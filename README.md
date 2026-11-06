@@ -30,7 +30,7 @@
    或直接在浏览器打开：
 
    ```
-   mygo-music://install-plugin?repo=<你的用户名>/mygo-music-flac
+   mygo-music://install-plugin?repo=yunforge/mygo-music-download
    ```
 
 2. **本地文件夹 / ZIP**：把整个项目打包成 zip，或用文件夹形式，在
@@ -109,7 +109,7 @@ node test/harness.mjs
 2. 在仓库 About 中添加话题 `mygo-music-plugin`，即可出现在 MyGo 的插件列表页。
 3. 打一个 Release 并上传 zip（可选，命名如 `plugin-darwin-arm64.zip` 或直接 `plugin.zip`），
    或直接使用默认分支最新提交。新的 tag / commit 即视为新版本。
-4. 安装链接：`mygo-music://install-plugin?repo=<owner>/<repo>`。
+4. 安装链接：`mygo-music://install-plugin?repo=yunforge/mygo-music-download`。
 
 ## 免责声明
 
