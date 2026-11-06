@@ -1,7 +1,7 @@
 // 开发用测试脚本（不属于插件运行时代码）。
 // 用法：node test/harness.mjs
 // 它用 stub 的全局 host 载入 index.js，并调用真实的 flac.music.hi.cn 接口，
-// 验证 search / stream / lyrics / album / home / browse 端到端可用。
+// 验证 search / stream / lyrics / album / browse 端到端可用。
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,28 +118,22 @@ if (withAlbum) {
   check(al.tracks.every((t) => /^(wyy|kuwo):/.test(t.id)), "专辑曲目 id 带平台前缀");
 }
 
-// ---------- 6. home + browse ----------
-line("home()");
-const h = await mod.home();
-console.log("  title:", h.title, "sections:", h.sections.length);
-const chartSection = h.sections.find(
-  (sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page))
-);
-check(!!chartSection, "首页有网易云榜单链接");
-check(!!(chartSection && chartSection.links.some((l) => l.imageUrl)), "网易云榜单链接带封面 imageUrl");
-check(
-  !h.sections.some((sec) => sec.links && sec.links.some((l) => l.page === "about")),
-  "首页不再有“使用说明/如何下载”入口"
-);
-const biliSec = h.sections.find((sec) => sec.links && sec.links.some((l) => l.page === "bili_chart"));
-check(!!biliSec, "首页有 B站 榜单入口");
-check(!!(biliSec && biliSec.links[0] && biliSec.links[0].imageUrl), "B站榜单入口带封面");
+// ---------- 6. browse（热门榜单，单页） ----------
+line("home removed");
+check(typeof mod.home !== "function", "已移除 home()，只保留热门榜单页");
 
 line("browse charts");
 const bc = await mod.browse({ page: "charts" });
 const wySec = bc.sections.find((sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page)));
 check(!!wySec && wySec.links.length > 0, "榜单页有网易云链接");
 check(!!(wySec && wySec.links.some((l) => l.imageUrl)), "榜单页网易云链接带封面");
+check(
+  !bc.sections.some((sec) => sec.links && sec.links.some((l) => l.page === "about")),
+  "榜单页不再有“使用说明/如何下载”入口"
+);
+const biliLinkSec = bc.sections.find((sec) => sec.links && sec.links.some((l) => l.page === "bili_chart"));
+check(!!biliLinkSec, "榜单页有 B站 榜单入口");
+check(!!(biliLinkSec && biliLinkSec.links[0] && biliLinkSec.links[0].imageUrl), "B站榜单入口带封面");
 
 line("browse bili_chart (B站音乐区排行榜)");
 const bb = await mod.browse({ page: "bili_chart" });
