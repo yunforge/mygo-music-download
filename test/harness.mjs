@@ -18,7 +18,18 @@ globalThis.host = {
   t(s) {
     return s;
   },
-  storage: { get() {}, set() {}, remove() {} },
+  storage: (() => {
+    const m = new Map();
+    return {
+      get: (k) => (m.has(k) ? m.get(k) : undefined),
+      set: (k, v) => {
+        m.set(k, v);
+      },
+      remove: (k) => {
+        m.delete(k);
+      },
+    };
+  })(),
   dir: "/tmp",
   dataDir: "/tmp",
   crypto: { md5: (s) => s },
@@ -190,7 +201,48 @@ if (bt) {
 }
 SETTINGS = {};
 
-// ---------- 9. 空查询 / 其他 kind ----------
+// ---------- 9. 歌单：创建 / 添加(右键) / 读取 / 改名 / 排序 / 移除 / 删除 ----------
+line("playlists: create");
+SETTINGS = {}; // all 模式，用真实搜索结果 id
+const s0 = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+const trackA = s0.tracks[0];
+const trackB = s0.tracks[1] || s0.tracks[0];
+const created = await mod.createPlaylist({ name: "我的测试歌单" });
+console.log("  created:", created.id, created.name, "mine:", created.mine);
+check(!!created.id && created.name === "我的测试歌单" && created.mine === true, "创建歌单成功且 mine=true");
+
+line("playlists: addToPlaylist (模拟右键添加到歌单)");
+await mod.addToPlaylist({ id: created.id, trackIds: [trackA.id, trackB.id] });
+const plFull = await mod.playlist({ id: created.id });
+console.log("  playlist tracks:", plFull.tracks.length, "first:", plFull.tracks[0] && plFull.tracks[0].name);
+check(plFull.tracks.length === 2, "歌单里有 2 首");
+check(plFull.tracks.every((t) => t.id && t.name && t.album), "歌单曲目带完整元数据（可展示/播放）");
+check(!!plFull.imageUrl && /^https?:\/\//.test(plFull.imageUrl), "歌单封面取自首曲封面");
+
+line("playlists: playlists() 列表 & browse charts 底部我的歌单");
+const allpl = await mod.playlists();
+check(allpl.some((p) => p.id === created.id && p.mine === true), "playlists() 返回该歌单标 mine");
+const ch = await mod.browse({ page: "charts" });
+const mySec = ch.sections.find((sec) => sec.title === "My Playlists");
+check(!!mySec && Array.isArray(mySec.playlists) && mySec.playlists.some((p) => p.id === created.id), "榜单页底部有「我的歌单」分区并含该歌单");
+
+line("playlists: rename / move / remove");
+await mod.renamePlaylist({ id: created.id, name: "改名后的歌单" });
+let pl2 = await mod.playlist({ id: created.id });
+check(pl2.name === "改名后的歌单", "歌单改名生效");
+await mod.movePlaylistTrack({ id: created.id, from: 0, to: 1 });
+pl2 = await mod.playlist({ id: created.id });
+check(pl2.tracks[1] && pl2.tracks[1].id === trackA.id, "movePlaylistTrack 生效（首曲移到末尾）");
+await mod.removeFromPlaylist({ id: created.id, trackIds: [trackA.id] });
+pl2 = await mod.playlist({ id: created.id });
+check(pl2.tracks.length === 1, "removeFromPlaylist 删除一首后剩 1 首");
+
+line("playlists: delete");
+await mod.deletePlaylist({ id: created.id });
+const after = await mod.playlists();
+check(!after.some((p) => p.id === created.id), "删除歌单后列表不再包含");
+
+// ---------- 10. 空查询 / 其他 kind ----------
 line("边界：空查询 & 非 tracks kind");
 const e1 = await mod.search({ query: "", kind: "tracks", offset: 0 });
 check(e1.tracks.length === 0 && e1.more === false, "空查询返回空");

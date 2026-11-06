@@ -575,9 +575,15 @@ async function chartSections() {
 export async function browse({ page }) {
   const s = String(page == null ? "" : page);
   if (s === "charts") {
+    const sections = await chartSections();
+    // 热门榜单下面就是「我的歌单」
+    sections.push({
+      title: t("My Playlists"),
+      playlists: listPlaylistsMeta(),
+    });
     return {
       title: t("Charts"),
-      sections: await chartSections(),
+      sections: sections,
     };
   }
   if (s === "bili_chart") {
@@ -618,4 +624,175 @@ export async function browse({ page }) {
     };
   }
   throw fail("unavailable", "no such page");
+}
+
+// ===================== 歌单（我的歌单，本地保存于 host.storage） =====================
+// 右键歌曲 → 「添加到歌单」由 App 调用 addToPlaylist；歌单数据存在本插件 storage。
+const PL_KEY = "playlists";
+
+function loadPlaylists() {
+  try {
+    const v = host.storage.get(PL_KEY);
+    return Array.isArray(v) ? v : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function savePlaylists(list) {
+  try {
+    host.storage.set(PL_KEY, list);
+  } catch (e) {}
+}
+
+function newPlaylistId() {
+  return "pl_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+function playlistMeta(pl) {
+  return {
+    id: pl.id,
+    name: pl.name,
+    imageUrl: pl.imageUrl || "",
+    description: pl.description || "",
+    owner: pl.owner || "",
+    trackCount: Array.isArray(pl.tracks) ? pl.tracks.length : pl.trackCount || 0,
+    mine: true,
+  };
+}
+
+function listPlaylistsMeta() {
+  return loadPlaylists().map(playlistMeta);
+}
+
+function findPlaylist(list, id) {
+  return list.find((pl) => pl.id === id) || null;
+}
+
+function refreshPlaylistCover(pl) {
+  if (pl.tracks && pl.tracks.length > 0) {
+    const t0 = pl.tracks[0];
+    if (t0 && t0.album && t0.album.imageUrl) pl.imageUrl = t0.album.imageUrl;
+  }
+}
+
+// 把 track id 还原成完整 Track（加入歌单时保存元数据，供歌单页展示/播放）
+async function resolveTrackById(id) {
+  const p = parseId(id);
+  if (!p.id) return null;
+  if (p.platform === "wyy" || p.platform === "kuwo") {
+    try {
+      const d = await api("song", { platform: p.platform, id: p.id });
+      const it = d && d.list && d.list[0];
+      if (it) return songToTrack(p.platform, it);
+    } catch (e) {}
+    return null;
+  }
+  if (p.platform === "bili") {
+    try {
+      const r = await fetch(BILI + "/x/web-interface/view?bvid=" + encodeURIComponent(p.id), {
+        headers: { "User-Agent": UA, Referer: BILI_WEB },
+      });
+      const j = await r.json().catch(() => ({}));
+      const v = j && j.data;
+      if (v && v.bvid) {
+        return {
+          id: "bili:" + v.bvid,
+          name: stripTags(v.title || ""),
+          artists: [{ id: "", name: stripTags((v.owner && v.owner.name) || ""), imageUrl: "" }],
+          album: { id: "", name: "Bilibili", imageUrl: biliPic(v.pic) },
+          duration: Math.round(Number(v.duration || 0) * 1000),
+          url: "https://www.bilibili.com/video/" + v.bvid,
+          unavailable: false,
+        };
+      }
+    } catch (e) {}
+    return null;
+  }
+  return null;
+}
+
+export async function playlists() {
+  return listPlaylistsMeta();
+}
+
+export async function playlist({ id }) {
+  const pl = findPlaylist(loadPlaylists(), String(id));
+  if (!pl) throw fail("unavailable", "playlist not found");
+  return Object.assign(playlistMeta(pl), { tracks: pl.tracks || [] });
+}
+
+export async function createPlaylist({ name }) {
+  const list = loadPlaylists();
+  const nm = String(name == null ? "" : name).trim() || t("New Playlist");
+  const pl = {
+    id: newPlaylistId(),
+    name: nm,
+    imageUrl: "",
+    description: "",
+    owner: "",
+    mine: true,
+    tracks: [],
+  };
+  list.unshift(pl);
+  savePlaylists(list);
+  return Object.assign(playlistMeta(pl), { tracks: [] });
+}
+
+export async function renamePlaylist({ id, name }) {
+  const list = loadPlaylists();
+  const pl = findPlaylist(list, String(id));
+  if (!pl) throw fail("unavailable", "playlist not found");
+  const nm = String(name == null ? "" : name).trim();
+  if (nm) pl.name = nm;
+  savePlaylists(list);
+}
+
+export async function deletePlaylist({ id }) {
+  savePlaylists(loadPlaylists().filter((pl) => pl.id !== String(id)));
+}
+
+export async function addToPlaylist({ id, trackIds }) {
+  const list = loadPlaylists();
+  const pl = findPlaylist(list, String(id));
+  if (!pl) throw fail("unavailable", "playlist not found");
+  if (!Array.isArray(pl.tracks)) pl.tracks = [];
+  const ids = Array.isArray(trackIds) ? trackIds : [];
+  const have = new Set(pl.tracks.map((tr) => tr.id));
+  for (const tid of ids) {
+    const key = String(tid);
+    if (have.has(key)) continue;
+    const tr = await resolveTrackById(key);
+    if (tr) {
+      pl.tracks.push(tr);
+      have.add(key);
+    }
+  }
+  refreshPlaylistCover(pl);
+  savePlaylists(list);
+}
+
+export async function removeFromPlaylist({ id, trackIds }) {
+  const list = loadPlaylists();
+  const pl = findPlaylist(list, String(id));
+  if (!pl) throw fail("unavailable", "playlist not found");
+  const drop = new Set((Array.isArray(trackIds) ? trackIds : []).map(String));
+  pl.tracks = (pl.tracks || []).filter((tr) => !drop.has(tr.id));
+  refreshPlaylistCover(pl);
+  savePlaylists(list);
+}
+
+export async function movePlaylistTrack({ id, from, to }) {
+  const list = loadPlaylists();
+  const pl = findPlaylist(list, String(id));
+  if (!pl) throw fail("unavailable", "playlist not found");
+  const tracks = pl.tracks || [];
+  const a = Number(from);
+  const b = Number(to);
+  if (a >= 0 && a < tracks.length && b >= 0 && b < tracks.length) {
+    const moved = tracks.splice(a, 1)[0];
+    tracks.splice(b, 0, moved);
+    pl.tracks = tracks;
+    savePlaylists(list);
+  }
 }
