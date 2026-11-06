@@ -125,13 +125,34 @@ console.log("  title:", h.title, "sections:", h.sections.length);
 const chartSection = h.sections.find(
   (sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page))
 );
-check(!!chartSection, "首页有榜单链接");
-check(!!(chartSection && chartSection.links.some((l) => l.imageUrl)), "榜单链接带封面 imageUrl");
+check(!!chartSection, "首页有网易云榜单链接");
+check(!!(chartSection && chartSection.links.some((l) => l.imageUrl)), "网易云榜单链接带封面 imageUrl");
+check(
+  !h.sections.some((sec) => sec.links && sec.links.some((l) => l.page === "about")),
+  "首页不再有“使用说明/如何下载”入口"
+);
+const biliSec = h.sections.find((sec) => sec.links && sec.links.some((l) => l.page === "bili_chart"));
+check(!!biliSec, "首页有 B站 榜单入口");
+check(!!(biliSec && biliSec.links[0] && biliSec.links[0].imageUrl), "B站榜单入口带封面");
 
 line("browse charts");
 const bc = await mod.browse({ page: "charts" });
-check(bc.sections[0].links.length > 0, "榜单页有链接");
-check(bc.sections[0].links.some((l) => l.imageUrl), "榜单页链接带封面");
+const wySec = bc.sections.find((sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page)));
+check(!!wySec && wySec.links.length > 0, "榜单页有网易云链接");
+check(!!(wySec && wySec.links.some((l) => l.imageUrl)), "榜单页网易云链接带封面");
+
+line("browse bili_chart (B站音乐区排行榜)");
+const bb = await mod.browse({ page: "bili_chart" });
+console.log("  title:", bb.title, "tracks:", bb.sections[0].tracks.length);
+check(bb.sections[0].tracks.length > 0, "B站榜单页有曲目");
+check(bb.sections[0].tracks.every((t) => t.id.startsWith("bili:")), "B站榜单曲目 id 带 bili: 前缀");
+if (bb.sections[0].tracks[0]) {
+  const btrack = bb.sections[0].tracks[0];
+  const bst = await mod.stream({ id: btrack.id, quality: "high" });
+  console.log("  first:", btrack.name.slice(0, 24), "→", bst.type, bst.bitRate);
+  check(bst.type === "m4a", "B站榜单曲目可流式取到音轨");
+  await probeAudio(bst, "bili rank");
+}
 
 line("browse playlist (热歌榜)");
 const bp = await mod.browse({ page: "playlist:wyy:3778678" });

@@ -4,14 +4,14 @@
 // 导出能力：home, browse, search, album, stream, lyrics
 //
 // 架构说明：
-//   search   —— 按设置里的 platform（wyy / kuwo / all）检索歌曲，支持分页（offset）。
+//   search   —— 按设置里的 platform（all / wyy / kuwo / bili）检索歌曲，支持分页（offset）。
 //   stream   —— 播放 / 下载共用。按 quality 选择音源：
 //               lossless → flac；high → mp3 320；standard → mp3 128。
 //               可在插件设置里用 quality 覆盖 App 全局音质；留空则跟随 App。
 //               返回的 type 决定下载文件扩展名，因此“无损”质量会下载到 .flac 文件。
 //   lyrics   —— 拉取 LRC 歌词。
 //   album    —— 专辑详情 + 曲目。
-//   home/browse —— 首页与榜单（网易云歌单，榜单带封面）。
+//   home/browse —— 首页与榜单（网易云歌单 + B站音乐区排行榜，链接带封面）。
 //
 // 反爬要点：getUrl / getLyric 需要 time + sign，且会过期；每次调用前先用
 // act=song 取一次最新的 time/sign/minfo。直链音频需要带 Referer 才能下载。
@@ -329,6 +329,37 @@ async function biliStream(bvid, quality) {
   };
 }
 
+// B站音乐区排行榜（rid=3 音乐区，type=all）。实测无需 cookie 即可返回。
+async function biliRanking() {
+  const r = await fetch(
+    BILI + "/x/web-interface/ranking/v2?rid=3&type=all",
+    { headers: { "User-Agent": UA, Referer: BILI_WEB } }
+  );
+  const j = await r.json().catch(() => ({}));
+  if (!j || j.code !== 0) {
+    throw fail("unavailable", "bili ranking: " + (j && (j.message || j.code)));
+  }
+  return (j.data && j.data.list) || [];
+}
+
+// 排行榜条目字段与搜索略有不同：owner.name、duration 为整数秒、pic 为完整 URL
+function biliRankToTrack(v) {
+  const bvid = v.bvid || "";
+  const dur =
+    typeof v.duration === "number"
+      ? v.duration * 1000
+      : parseBiliDuration(v.duration);
+  return {
+    id: "bili:" + bvid,
+    name: stripTags(v.title),
+    artists: [{ id: "", name: (v.owner && v.owner.name) || v.author || "", imageUrl: "" }],
+    album: { id: "", name: "Bilibili", imageUrl: biliPic(v.pic) },
+    duration: dur,
+    url: bvid ? "https://www.bilibili.com/video/" + bvid : "",
+    unavailable: false,
+  };
+}
+
 async function doSearch(keyword, offset) {
   const mode = currentMode();
   const count = PAGE;
@@ -495,8 +526,8 @@ export async function lyrics({ id }) {
   return { lrc: "" };
 }
 
-// 榜单链接，带封面（向接口取每个歌单的 pic_url）
-async function chartLinks() {
+// 网易云榜单链接（带封面，向接口取每个歌单的 pic_url）
+async function wyyChartLinks() {
   return Promise.all(
     CHARTS.map(async (c) => {
       let title = c.title;
@@ -517,43 +548,57 @@ async function chartLinks() {
   );
 }
 
+// 各平台榜单分区：网易云 + B站（酷我公开接口取不到真实榜单，见 README）
+async function chartSections() {
+  const secs = [];
+  secs.push({ title: t("NetEase Cloud Music"), links: await wyyChartLinks() });
+
+  let biliCover = "";
+  try {
+    const list = await biliRanking();
+    if (list && list[0]) biliCover = biliPic(list[0].pic);
+  } catch (e) {}
+  secs.push({
+    title: t("Bilibili"),
+    links: [
+      {
+        title: t("Music Ranking"),
+        subtitle: t("Bilibili"),
+        imageUrl: biliCover,
+        page: "bili_chart",
+      },
+    ],
+  });
+  return secs;
+}
+
 export async function home() {
-  const links = await chartLinks();
+  const sections = await chartSections();
   return {
     title: t("Music Download"),
     subtitle: t("Search in the search bar · download FLAC lossless"),
-    sections: [
-      {
-        title: t("How to download"),
-        links: [
-          {
-            title: t("Type a song name in the search bar to search"),
-            subtitle: t("Choose the source in Settings"),
-            page: "about",
-          },
-        ],
-      },
-      { title: t("Charts"), links: links },
-    ],
+    sections: sections,
   };
 }
 
 export async function browse({ page }) {
   const s = String(page == null ? "" : page);
   if (s === "charts") {
-    const links = await chartLinks();
     return {
       title: t("Charts"),
-      sections: [{ title: t("NetEase Cloud Music"), links: links }],
+      sections: await chartSections(),
     };
   }
-  if (s === "about") {
+  if (s === "bili_chart") {
+    let tracks = [];
+    try {
+      tracks = (await biliRanking()).map(biliRankToTrack);
+    } catch (e) {
+      tracks = [];
+    }
     return {
-      title: t("How to download"),
-      subtitle: t(
-        "Type a song name in the search bar to search. Set the source (wyy / kuwo / all) and an optional download quality under Settings → Plugins. With quality lossless you download FLAC."
-      ),
-      sections: [],
+      title: t("Bilibili") + " · " + t("Music Ranking"),
+      sections: [{ title: t("Songs"), tracks: tracks }],
     };
   }
   if (s.indexOf("playlist:") === 0) {
