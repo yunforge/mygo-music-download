@@ -18,7 +18,7 @@
 - 🎚️ **插件内音质设置**：可在「设置 → 插件 → 音乐下载」里单独指定下载音质
   （`lossless / high / standard`），留空则跟随 App 的全局音质。
 - 📄 **歌词**：联网拉取 LRC 歌词并显示。
-- 💿 **专辑 / 榜单**：支持打开专辑详情；首页与「榜单」页按平台分栏——
+- 💿 **专辑 / 榜单**：支持打开专辑详情；「热门榜单」页按平台分栏——
   **网易云** 内置热歌榜 / 新歌榜 / 飙升榜 / 原创榜，**B站** 提供音乐区排行榜，榜单项均带真实封面。
   （酷我官方榜单接口需反爬令牌、公开接口取不到榜单数据，故暂不提供酷我榜单。）
 - 🌐 **双语界面**：内置简体中文翻译（`locales/zh-CN.json`）。
@@ -86,7 +86,7 @@
 ```
 .
 ├── plugin.json          # 插件清单（id / 权限 / 设置 / 导航）
-├── index.js             # 插件主文件（home/browse/search/album/stream/lyrics）
+├── index.js             # 插件主文件（browse/search/album/stream/lyrics）
 ├── locales/zh-CN.json   # 简体中文翻译
 ├── test/harness.mjs     # 开发用端到端测试（不属于运行时）
 ├── README.md

@@ -1,7 +1,7 @@
 // MyGo Music 插件 — 音乐下载 / Music Download
 // 数据来源：https://flac.music.hi.cn/ （网易云 wyy / 酷我 kuwo）
 //          + B站（bilibili，走官方接口取真实音频）
-// 导出能力：home, browse, search, album, stream, lyrics
+// 导出能力：browse, search, album, stream, lyrics
 //
 // 架构说明：
 //   search   —— 按设置里的 platform（all / wyy / kuwo / bili）检索歌曲，支持分页（offset）。
@@ -11,7 +11,7 @@
 //               返回的 type 决定下载文件扩展名，因此“无损”质量会下载到 .flac 文件。
 //   lyrics   —— 拉取 LRC 歌词。
 //   album    —— 专辑详情 + 曲目。
-//   home/browse —— 首页与榜单（网易云歌单 + B站音乐区排行榜，链接带封面）。
+//   browse   —— 榜单页（网易云歌单 + B站音乐区排行榜，链接带封面）。
 //
 // 反爬要点：getUrl / getLyric 需要 time + sign，且会过期；每次调用前先用
 // act=song 取一次最新的 time/sign/minfo。直链音频需要带 Referer 才能下载。
@@ -570,15 +570,6 @@ async function chartSections() {
     ],
   });
   return secs;
-}
-
-export async function home() {
-  const sections = await chartSections();
-  return {
-    title: t("Music Download"),
-    subtitle: t("Search in the search bar · download FLAC lossless"),
-    sections: sections,
-  };
 }
 
 export async function browse({ page }) {
