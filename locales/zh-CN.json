@@ -1,11 +1,17 @@
 {
-  "Lossless Music": "无损音乐",
-  "Multi-site search · download FLAC lossless": "多站合一搜索 · 支持下载无损 FLAC",
+  "Music Download": "音乐下载",
+  "Search in the search bar · download FLAC lossless": "在搜索框输入歌名 · 下载无损 FLAC",
   "Charts": "热门榜单",
   "NetEase Cloud Music": "网易云音乐",
-  "Getting started": "使用说明",
-  "Choose the search source in Settings": "在设置中选择搜索来源",
+  "How to download": "如何下载",
+  "Type a song name in the search bar to search": "在搜索框输入歌名即可搜索",
+  "Choose the source in Settings": "可在设置里切换搜索来源",
   "Songs": "歌曲",
   "Playlist": "歌单",
-  "Set the search source to wyy / kuwo / all under Settings → Plugins, and pick “Lossless” as the playback quality to download FLAC.": "在「设置 → 插件」中把搜索来源设为 wyy / kuwo / all，并在播放质量里选择「无损(Lossless)」，即可下载 FLAC 无损音乐。"
+  "Search source (wyy / kuwo / all)": "搜索来源 (wyy / kuwo / all)",
+  "wyy = NetEase Cloud Music, kuwo = Kuwo, all = both. Leave empty for all.": "wyy=网易云音乐，kuwo=酷我音乐，all=两站合并。留空默认 all。",
+  "Download quality (lossless / high / standard)": "下载音质 (lossless / high / standard)",
+  "Overrides the app's playback quality for this plugin. Leave empty to follow the app setting. lossless = FLAC, high = MP3 320, standard = MP3 128.": "覆盖 App 的播放音质（仅本插件）。留空则跟随 App 设置。lossless=无损 FLAC，high=MP3 320，standard=MP3 128。",
+  "Help": "使用说明",
+  "Type a song name in the search bar to search. Set the source (wyy / kuwo / all) and an optional download quality under Settings → Plugins. With quality lossless you download FLAC.": "在搜索框输入歌名即可搜索。可在「设置 → 插件」里切换来源（wyy / kuwo / all）并设置下载音质；音质选无损时下载 FLAC。"
 }

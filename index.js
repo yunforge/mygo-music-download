@@ -1,4 +1,4 @@
-// MyGo Music plugin — 无损音乐搜索与下载
+// MyGo Music 插件 — 音乐下载 / Music Download
 // 数据来源：https://flac.music.hi.cn/ （多站合一：网易云音乐 wyy / 酷我音乐 kuwo）
 // 导出能力：home, browse, search, album, stream, lyrics
 //
@@ -6,10 +6,11 @@
 //   search   —— 按设置里的 platform（wyy / kuwo / all）检索歌曲，支持分页（offset）。
 //   stream   —— 播放 / 下载共用。按 quality 选择音源：
 //               lossless → flac；high → mp3 320；standard → mp3 128。
+//               可在插件设置里用 quality 覆盖 App 全局音质；留空则跟随 App。
 //               返回的 type 决定下载文件扩展名，因此“无损”质量会下载到 .flac 文件。
 //   lyrics   —— 拉取 LRC 歌词。
 //   album    —— 专辑详情 + 曲目。
-//   home/browse —— 首页与榜单（网易云歌单）。
+//   home/browse —— 首页与榜单（网易云歌单，榜单带封面）。
 //
 // 反爬要点：getUrl / getLyric 需要 time + sign，且会过期；每次调用前先用
 // act=song 取一次最新的 time/sign/minfo。直链音频需要带 Referer 才能下载。
@@ -87,6 +88,18 @@ function currentMode() {
   if (/^(kuwo|k|2|酷我|酷我音乐)$/.test(v)) return "kuwo";
   if (/^(wyy|w|1|netease|网易|网易云|网易云音乐)$/.test(v)) return "wyy";
   return "all";
+}
+
+// 插件内“下载音质”设置：覆盖 App 的全局音质；留空则跟随 App
+function settingQuality() {
+  let v = "";
+  try {
+    v = String(host.setting("quality") || "").trim().toLowerCase();
+  } catch (e) {}
+  if (/^(lossless|flac|无损|sq)$/.test(v)) return "lossless";
+  if (/^(high|320|hq|高音质|高)$/.test(v)) return "high";
+  if (/^(standard|128|std|标准)$/.test(v)) return "standard";
+  return "";
 }
 
 // id 形如 "<platform>:<songId>" / "<platform>:<albumId>"
@@ -241,91 +254,114 @@ function parseSize(s) {
 }
 
 export async function stream({ id, quality }) {
-  quality = quality || "high";
+  // 插件设置里的音质优先，其次用 App 传入的，最后默认 high
+  quality = settingQuality() || quality || "high";
   const p = parseId(id);
   if (p.platform !== "wyy" && p.platform !== "kuwo") {
     throw fail("unavailable", "invalid track id");
   }
   const songId = p.id;
-  // 取最新的 time / sign / minfo
-  const d = await api("song", { platform: p.platform, id: songId });
-  const item = ((d && d.list) || [])[0];
-  if (!item) throw fail("unavailable", "song not found");
-  const info = pickMinfo(item.minfo, quality);
-  if (!info) throw fail("unavailable", "no source for quality: " + quality);
-  const u = await api("getUrl", {
-    platform: p.platform,
-    songid: songId,
-    format: info.format,
-    bitrate: info.bitrate,
-    time: item.time,
-    sign: item.sign,
-  });
-  if (!u || !u.url) throw fail("unavailable", "no download url");
   const referer =
     p.platform === "kuwo" ? "https://www.kuwo.cn/" : "https://music.163.com/";
-  return {
-    url: u.url,
-    type: u.format || info.format || "mp3",
-    quality: quality,
-    bitRate: Number(info.bitrate) || undefined,
-    size: parseSize(info.size),
-    headers: { Referer: referer, "User-Agent": UA },
-  };
+  // time/sign 会过期，且偶发一次无效（冷启动/瞬时）。每次重试都重新取 song 拿新 token。
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
+    try {
+      const d = await api("song", { platform: p.platform, id: songId });
+      const item = ((d && d.list) || [])[0];
+      if (!item) throw fail("unavailable", "song not found");
+      const info = pickMinfo(item.minfo, quality);
+      if (!info) throw fail("unavailable", "no source for quality: " + quality);
+      const u = await api("getUrl", {
+        platform: p.platform,
+        songid: songId,
+        format: info.format,
+        bitrate: info.bitrate,
+        time: item.time,
+        sign: item.sign,
+      });
+      if (!u || !u.url) throw fail("unavailable", "no download url");
+      return {
+        url: u.url,
+        type: u.format || info.format || "mp3",
+        quality: quality,
+        bitRate: Number(info.bitrate) || undefined,
+        size: parseSize(info.size),
+        headers: { Referer: referer, "User-Agent": UA },
+      };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || fail("unavailable", "stream failed");
 }
 
 export async function lyrics({ id }) {
   const p = parseId(id);
   if (p.platform !== "wyy" && p.platform !== "kuwo") return { lrc: "" };
   const songId = p.id;
-  let item;
-  try {
-    const d = await api("song", { platform: p.platform, id: songId });
-    item = ((d && d.list) || [])[0];
-  } catch (e) {
-    return { lrc: "" };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
+    try {
+      const d = await api("song", { platform: p.platform, id: songId });
+      const item = ((d && d.list) || [])[0];
+      if (!item) continue;
+      const data = await api("getLyric", {
+        platform: p.platform,
+        songid: songId,
+        time: item.time,
+        sign: item.sign,
+      });
+      const lrc =
+        typeof data === "string" ? data : (data && (data.lrc || data.lyric || "")) || "";
+      if (lrc) return { lrc: lrc };
+    } catch (e) {
+      // 重试
+    }
   }
-  if (!item) return { lrc: "" };
-  try {
-    const data = await api("getLyric", {
-      platform: p.platform,
-      songid: songId,
-      time: item.time,
-      sign: item.sign,
-    });
-    const lrc =
-      typeof data === "string" ? data : (data && (data.lrc || data.lyric || "")) || "";
-    return { lrc: lrc };
-  } catch (e) {
-    return { lrc: "" };
-  }
+  return { lrc: "" };
 }
 
-function chartLinks() {
-  return CHARTS.map((c) => ({
-    title: c.title,
-    subtitle: t("NetEase Cloud Music"),
-    imageUrl: "",
-    page: "playlist:wyy:" + c.id,
-  }));
+// 榜单链接，带封面（向接口取每个歌单的 pic_url）
+async function chartLinks() {
+  return Promise.all(
+    CHARTS.map(async (c) => {
+      let title = c.title;
+      let imageUrl = "";
+      try {
+        const d = await api("playlist", { platform: "wyy", id: c.id, page: 1, size: 1 });
+        const info = (d && d.info) || {};
+        if (info.name) title = info.name;
+        if (info.pic_url) imageUrl = info.pic_url;
+      } catch (e) {}
+      return {
+        title: t(title),
+        subtitle: t("NetEase Cloud Music"),
+        imageUrl: imageUrl,
+        page: "playlist:wyy:" + c.id,
+      };
+    })
+  );
 }
 
-export function home() {
+export async function home() {
+  const links = await chartLinks();
   return {
-    title: t("Lossless Music"),
-    subtitle: t("Multi-site search · download FLAC lossless"),
+    title: t("Music Download"),
+    subtitle: t("Search in the search bar · download FLAC lossless"),
     sections: [
-      { title: t("Charts"), links: chartLinks() },
       {
-        title: t("Getting started"),
+        title: t("How to download"),
         links: [
           {
-            title: t("Choose the search source in Settings"),
-            subtitle: "wyy / kuwo / all",
+            title: t("Type a song name in the search bar to search"),
+            subtitle: t("Choose the source in Settings"),
             page: "about",
           },
         ],
       },
+      { title: t("Charts"), links: links },
     ],
   };
 }
@@ -333,16 +369,17 @@ export function home() {
 export async function browse({ page }) {
   const s = String(page == null ? "" : page);
   if (s === "charts") {
+    const links = await chartLinks();
     return {
       title: t("Charts"),
-      sections: [{ title: t("NetEase Cloud Music"), links: chartLinks() }],
+      sections: [{ title: t("NetEase Cloud Music"), links: links }],
     };
   }
   if (s === "about") {
     return {
-      title: t("Getting started"),
+      title: t("How to download"),
       subtitle: t(
-        "Set the search source to wyy / kuwo / all under Settings → Plugins, and pick “Lossless” as the playback quality to download FLAC."
+        "Type a song name in the search bar to search. Set the source (wyy / kuwo / all) and an optional download quality under Settings → Plugins. With quality lossless you download FLAC."
       ),
       sections: [],
     };

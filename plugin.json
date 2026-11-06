@@ -1,7 +1,7 @@
 {
   "id": "flac-music",
-  "name": "FLAC 无损音乐",
-  "version": "1.0.0",
+  "name": "Music Download",
+  "version": "1.1.0",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
@@ -18,13 +18,19 @@
   "settings": [
     {
       "key": "platform",
-      "label": "搜索来源 (wyy / kuwo / all)",
-      "help": "wyy = 网易云音乐，kuwo = 酷我音乐，all = 两站合并。留空默认 all。",
+      "label": "Search source (wyy / kuwo / all)",
+      "help": "wyy = NetEase Cloud Music, kuwo = Kuwo, all = both. Leave empty for all.",
       "link": "https://flac.music.hi.cn/"
+    },
+    {
+      "key": "quality",
+      "label": "Download quality (lossless / high / standard)",
+      "help": "Overrides the app's playback quality for this plugin. Leave empty to follow the app setting. lossless = FLAC, high = MP3 320, standard = MP3 128."
     }
   ],
   "navigation": [
     { "builtin": "home" },
-    { "title": "榜单", "page": "charts", "icon": "star" }
+    { "title": "Charts", "page": "charts", "icon": "star" },
+    { "title": "Help", "page": "about", "icon": "note" }
   ]
 }

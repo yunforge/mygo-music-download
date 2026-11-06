@@ -92,6 +92,14 @@ const sth = await mod.stream({ id: pick.id, quality: "high" });
 console.log("  type:", sth.type, "bitRate:", sth.bitRate);
 check(sth.type === "mp3", "high 返回 mp3");
 
+// 插件设置的 quality 覆盖 App 传入的音质
+line("插件设置 quality=lossless 覆盖 App 的 high");
+SETTINGS = { quality: "lossless" };
+const stq = await mod.stream({ id: pick.id, quality: "high" });
+console.log("  type:", stq.type);
+check(stq.type === "flac", "设置覆盖生效：high 请求被强制为 flac");
+SETTINGS = {};
+
 // ---------- 4. lyrics ----------
 line("lyrics: " + pick.id);
 const ly = await mod.lyrics({ id: pick.id });
@@ -112,13 +120,18 @@ if (withAlbum) {
 
 // ---------- 6. home + browse ----------
 line("home()");
-const h = mod.home();
+const h = await mod.home();
 console.log("  title:", h.title, "sections:", h.sections.length);
-check(h.sections.length > 0 && h.sections[0].links.length > 0, "首页有榜单链接");
+const chartSection = h.sections.find(
+  (sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page))
+);
+check(!!chartSection, "首页有榜单链接");
+check(!!(chartSection && chartSection.links.some((l) => l.imageUrl)), "榜单链接带封面 imageUrl");
 
 line("browse charts");
 const bc = await mod.browse({ page: "charts" });
 check(bc.sections[0].links.length > 0, "榜单页有链接");
+check(bc.sections[0].links.some((l) => l.imageUrl), "榜单页链接带封面");
 
 line("browse playlist (热歌榜)");
 const bp = await mod.browse({ page: "playlist:wyy:3778678" });
