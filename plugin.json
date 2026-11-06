@@ -1,7 +1,7 @@
 {
   "id": "flac-music",
   "name": "Music Download",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
@@ -12,20 +12,28 @@
       "music.163.com",
       "*.kuwo.cn",
       "kuwo.cn",
-      "www.kuwo.cn"
+      "www.kuwo.cn",
+      "api.bilibili.com",
+      "www.bilibili.com",
+      "*.bilibili.com",
+      "*.hdslb.com",
+      "*.bilivideo.com",
+      "*.bilivideo.cn",
+      "*.szbdyd.com",
+      "*.biliapi.net"
     ]
   },
   "settings": [
     {
       "key": "platform",
-      "label": "Search source (wyy / kuwo / all)",
-      "help": "wyy = NetEase Cloud Music, kuwo = Kuwo, all = both. Leave empty for all.",
+      "label": "Search source (all / wyy / kuwo / bili)",
+      "help": "all = 网易云+酷我；wyy = 网易云音乐；kuwo = 酷我音乐；bili = B站(哔哩哔哩)。留空默认 all。B站走官方音轨，最高 192k（部分内容为 Hi-Res）。",
       "link": "https://flac.music.hi.cn/"
     },
     {
       "key": "quality",
       "label": "Download quality (lossless / high / standard)",
-      "help": "Overrides the app's playback quality for this plugin. Leave empty to follow the app setting. lossless = FLAC, high = MP3 320, standard = MP3 128."
+      "help": "Overrides the app's playback quality for this plugin. Leave empty to follow the app setting. lossless = FLAC, high = MP3 320, standard = MP3 128. B站按档位映射到最高可用音轨。"
     }
   ],
   "navigation": [

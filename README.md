@@ -2,13 +2,16 @@
 
 一个 [MyGo Music](https://github.com/egoist/mygo-music) 插件，接入
 [flac.music.hi.cn](https://flac.music.hi.cn/) 提供的**多站合一**音乐搜索
-（网易云音乐 `wyy` / 酷我音乐 `kuwo`），支持在线播放与**无损 FLAC 下载**。
+（网易云音乐 `wyy` / 酷我音乐 `kuwo`），并额外接入 **B站（bilibili）**，
+支持在线播放与**无损 FLAC 下载**。
 
 > 插件内部 id 仍为 `flac-music`（安装标识，保持不变）；显示名称为「音乐下载 / Music Download」。
 
 ## 功能
 
 - 🔍 **多站合一搜索**：可只搜网易云、只搜酷我，或两站合并（默认 `all`），支持分页加载。
+- 📺 **B站来源**：可把来源切换为 `bili`，通过 B 站官方接口搜索视频并下载其**真实音轨**
+  （最高 192k，部分内容为 Hi-Res；文件为 `.m4a` 容器）。
 - 🎵 **无损试听 / 下载**：根据质量自动选择音源 —— `无损(Lossless)` → FLAC，
   `高(High)` → MP3 320，`标准(Standard)` → MP3 128。
   MyGo 的「下载」会以音源类型作为扩展名，所以在设置里选「无损」即可下载到真正的 `.flac` 文件。
@@ -38,7 +41,7 @@
 ## 使用
 
 1. 打开「设置 → 插件 → 音乐下载」，可设置：
-   - **搜索来源**：`wyy`（网易云）/ `kuwo`（酷我）/ `all`（合并，默认）。
+   - **搜索来源**：`all`（网易云+酷我，默认）/ `wyy`（网易云）/ `kuwo`（酷我）/ `bili`（B站）。
    - **下载音质**：`lossless`（无损 FLAC）/ `high`（MP3 320）/ `standard`（MP3 128），留空跟随 App。
 2. 在主界面顶部搜索框输入歌名 / 歌手，结果来自所选来源。
 3. **在线播放**：直接点歌即可。
@@ -50,8 +53,12 @@
 
 - **汽水音乐 / QQ 音乐 / YouTube Music / Spotify**：本站（flac.music.hi.cn）后端只聚合
   **网易云** 与 **酷我** 两个来源，其它平台代码传给接口都会返回「不支持的平台」。
-  要接入这些来源需要各自独立的、可下载的接口：Spotify 有 DRM 无法直接下载，YouTube 需解密签名
-  （通常得靠 yt-dlp），QQ / 汽水有加密鉴权且不稳定。因此本插件暂只提供网易云 + 酷我。
+  经实测，公开接口（GD 音乐台、vkeys、Meting 系列等）也基本只能拿到**网易云**的音频直链，
+  QQ / 汽水 / YouTube / Spotify 要么无公开音频，要么 DRM / 加密鉴权 / 需解密签名（通常得靠 yt-dlp）。
+  故本插件未接入这四个来源。
+- **B站（bilibili）**：B 站有公开官方接口，可用 `x/web-interface/search/type` 搜索、用
+  `x/player/playurl` 取到真实 DASH 音轨直链，故已接入（`bili` 来源）。音频取自视频音轨，
+  匿名最高 192k，热门 Hi-Res（30251）音轨需登录 VIP。
 - **指定默认下载目录 / 歌词与封面一并下载**：MyGo 插件**没有任何文件写入 API**；App 的下载是
   调用系统「另存为」对话框保存**单个音频文件**（文件名「歌手 - 标题.扩展名」），且没有“下载目录”设置。
   所以插件无法改变保存路径，也无法把歌词 / 封面作为附加文件一起保存。这些需要修改 MyGo 本体才能实现。
@@ -68,6 +75,10 @@
   直链偶发一次无效时会自动重试（重新取令牌）。
 - 直链音频（网易云 / 酷我 CDN）**必须带 `Referer`**：网易云 `https://music.163.com/`，
   酷我 `https://www.kuwo.cn/`。插件在 `stream()` 返回的 `headers` 中带上 `Referer` 与 `User-Agent`。
+- **B站**：搜索前先请求 `x/frontend/finger/spi` 取 `buvid3`/`buvid4` 写入 Cookie 以规避风控，
+  再用 `x/web-interface/search/type` 搜索；取音频时用 `x/player/pagelist` 得 `cid`，
+  再 `x/player/playurl?fnval=16&fourk=1` 取 `dash.audio[]`，按音质挑最高可用音轨（`.m4a`），
+  下载同样需要 `Referer: https://www.bilibili.com/`（插件已在 `headers` 内附带）。
 
 ## 目录结构
 
@@ -90,7 +101,7 @@ node test/harness.mjs
 ```
 
 会用 stub 的 `host` 载入 `index.js`，并请求真实接口，校验搜索、分页、无损直链（含 `Referer`）、
-音质设置覆盖、歌词、专辑、榜单封面等是否正常。
+音质设置覆盖、歌词、专辑、榜单封面、B站搜索与音轨下载等是否正常。
 
 ## 发布
 

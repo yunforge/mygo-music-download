@@ -1,5 +1,6 @@
 // MyGo Music 插件 — 音乐下载 / Music Download
-// 数据来源：https://flac.music.hi.cn/ （多站合一：网易云音乐 wyy / 酷我音乐 kuwo）
+// 数据来源：https://flac.music.hi.cn/ （网易云 wyy / 酷我 kuwo）
+//          + B站（bilibili，走官方接口取真实音频）
 // 导出能力：home, browse, search, album, stream, lyrics
 //
 // 架构说明：
@@ -86,6 +87,7 @@ function currentMode() {
     v = String(host.setting("platform") || "").trim().toLowerCase();
   } catch (e) {}
   if (/^(kuwo|k|2|酷我|酷我音乐)$/.test(v)) return "kuwo";
+  if (/^(bili|bilibili|b站|哔哩|哔哩哔哩|bilibili音乐|3)$/.test(v)) return "bili";
   if (/^(wyy|w|1|netease|网易|网易云|网易云音乐)$/.test(v)) return "wyy";
   return "all";
 }
@@ -165,9 +167,175 @@ async function totalOf(platform, keyword) {
   }
 }
 
+// ===================== B站（bilibili） =====================
+const BILI = "https://api.bilibili.com";
+const BILI_WEB = "https://www.bilibili.com/";
+let biliCookieCache = { val: "", exp: 0 };
+
+// 通过 finger/spi 获取 buvid3/buvid4，规避搜索 412 风控
+async function biliCookie() {
+  const now = Date.now();
+  if (biliCookieCache.val && now < biliCookieCache.exp) return biliCookieCache.val;
+  try {
+    const r = await fetch(BILI + "/x/frontend/finger/spi", {
+      headers: { "User-Agent": UA, Referer: BILI_WEB },
+    });
+    const j = await r.json();
+    const d = (j && j.data) || {};
+    if (d.b_3) {
+      const c =
+        "buvid3=" + d.b_3 + "; buvid4=" + (d.b_4 || "") + "; b_nut=" + Math.floor(now / 1000);
+      biliCookieCache = { val: c, exp: now + 30 * 60 * 1000 };
+      return c;
+    }
+  } catch (e) {}
+  return "";
+}
+
+function biliHeaders(cookie) {
+  const h = { "User-Agent": UA, Referer: BILI_WEB };
+  if (cookie) h.Cookie = cookie;
+  return h;
+}
+
+function stripTags(s) {
+  return String(s == null ? "" : s)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
+function parseBiliDuration(str) {
+  const parts = String(str || "").split(":").map((x) => parseInt(x, 10) || 0);
+  let sec = 0;
+  for (const p of parts) sec = sec * 60 + p;
+  return sec * 1000;
+}
+
+function biliPic(p) {
+  const s = String(p == null ? "" : p);
+  if (!s) return "";
+  if (s.indexOf("//") === 0) return "https:" + s;
+  if (s.indexOf("http") === 0) return s;
+  return "https://" + s;
+}
+
+async function biliSearchPage(keyword, page) {
+  const cookie = await biliCookie();
+  const url =
+    BILI +
+    "/x/web-interface/search/type?search_type=video&keyword=" +
+    encodeURIComponent(keyword) +
+    "&page=" +
+    page;
+  const r = await fetch(url, { headers: biliHeaders(cookie) });
+  const j = await r.json().catch(() => ({}));
+  if (!j || j.code !== 0) {
+    throw fail("unavailable", "bili search: " + (j && (j.message || j.code)));
+  }
+  const data = j.data || {};
+  return { list: data.result || [], total: Number(data.numResults) || 0 };
+}
+
+async function fetchBiliRange(keyword, start, count) {
+  const out = [];
+  let total = 0;
+  if (count <= 0) return { items: out, total };
+  const firstPage = Math.floor(start / PAGE) + 1;
+  const lastPage = Math.floor((start + count - 1) / PAGE) + 1;
+  for (let p = firstPage; p <= lastPage; p++) {
+    let d;
+    try {
+      d = await biliSearchPage(keyword, p);
+    } catch (e) {
+      break;
+    }
+    total = d.total || total;
+    const list = d.list || [];
+    if (list.length === 0) break;
+    for (let i = 0; i < list.length; i++) {
+      const abs = (p - 1) * PAGE + i;
+      if (abs >= start && abs < start + count) out.push(list[i]);
+    }
+    if (list.length < PAGE) break;
+  }
+  return { items: out, total };
+}
+
+function biliToTrack(it) {
+  const bvid = it.bvid || "";
+  return {
+    id: "bili:" + bvid,
+    name: stripTags(it.title),
+    artists: [{ id: "", name: stripTags(it.author), imageUrl: "" }],
+    album: { id: "", name: "Bilibili", imageUrl: biliPic(it.pic) },
+    duration: parseBiliDuration(it.duration),
+    url: bvid ? "https://www.bilibili.com/video/" + bvid : "",
+    unavailable: false,
+  };
+}
+
+async function biliCid(bvid) {
+  const cookie = await biliCookie();
+  const r = await fetch(BILI + "/x/player/pagelist?bvid=" + encodeURIComponent(bvid), {
+    headers: biliHeaders(cookie),
+  });
+  const j = await r.json().catch(() => ({}));
+  const cid = j && j.data && j.data[0] && j.data[0].cid;
+  if (!cid) throw fail("unavailable", "bili: no cid");
+  return cid;
+}
+
+// B站音轨：30251=Hi-Res(flac) 30250=杜比 30280=192k 30232=132k 30216=64k
+function pickBiliAudio(auds, quality) {
+  const list = (auds || []).slice().sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+  if (list.length === 0) return null;
+  const byQ = (ids) => list.find((a) => ids.indexOf(Number(a.id)) >= 0);
+  if (quality === "lossless") return byQ([30251, 30250]) || list[0];
+  if (quality === "standard") return byQ([30216]) || byQ([30232]) || list[list.length - 1];
+  return byQ([30280]) || byQ([30232]) || list[0];
+}
+
+async function biliStream(bvid, quality) {
+  const cookie = await biliCookie();
+  const cid = await biliCid(bvid);
+  const url =
+    BILI +
+    "/x/player/playurl?bvid=" +
+    encodeURIComponent(bvid) +
+    "&cid=" +
+    cid +
+    "&fnval=16&fourk=1";
+  const r = await fetch(url, { headers: biliHeaders(cookie) });
+  const j = await r.json().catch(() => ({}));
+  const dash = j && j.data && j.data.dash;
+  const auds = (dash && dash.audio) || [];
+  const best = pickBiliAudio(auds, quality);
+  if (!best) throw fail("unavailable", "bili: no audio stream");
+  const u = best.baseUrl || best.base_url;
+  if (!u) throw fail("unavailable", "bili: no audio url");
+  const headers = { Referer: BILI_WEB, "User-Agent": UA };
+  if (cookie) headers.Cookie = cookie;
+  return {
+    url: u,
+    type: "m4a",
+    quality: quality,
+    bitRate: best.bandwidth ? Math.round(best.bandwidth / 1000) : undefined,
+    headers: headers,
+  };
+}
+
 async function doSearch(keyword, offset) {
   const mode = currentMode();
   const count = PAGE;
+  if (mode === "bili") {
+    const r = await fetchBiliRange(keyword, offset, count);
+    return { tracks: r.items.map(biliToTrack), more: offset + count < r.total };
+  }
   if (mode === "all") {
     const totals = await Promise.all([totalOf("wyy", keyword), totalOf("kuwo", keyword)]);
     const wyyTotal = totals[0];
@@ -257,6 +425,9 @@ export async function stream({ id, quality }) {
   // 插件设置里的音质优先，其次用 App 传入的，最后默认 high
   quality = settingQuality() || quality || "high";
   const p = parseId(id);
+  if (p.platform === "bili") {
+    return await biliStream(p.id, quality);
+  }
   if (p.platform !== "wyy" && p.platform !== "kuwo") {
     throw fail("unavailable", "invalid track id");
   }
@@ -299,6 +470,7 @@ export async function stream({ id, quality }) {
 
 export async function lyrics({ id }) {
   const p = parseId(id);
+  if (p.platform === "bili") return { lrc: "" };
   if (p.platform !== "wyy" && p.platform !== "kuwo") return { lrc: "" };
   const songId = p.id;
   for (let attempt = 0; attempt < 3; attempt++) {

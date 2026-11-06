@@ -154,7 +154,28 @@ if (sk.tracks[0]) {
   await probeAudio(stk, "kuwo lossless");
 }
 
-// ---------- 8. 空查询 / 其他 kind ----------
+// ---------- 8. B站（bilibili） ----------
+line("search bili 单站: 周杰伦");
+SETTINGS = { platform: "bili" };
+const sb = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+console.log("  tracks:", sb.tracks.length, "first:", sb.tracks[0] && sb.tracks[0].name);
+check(sb.tracks.length > 0, "B站返回了结果");
+check(sb.tracks.every((t) => t.id.startsWith("bili:")), "B站 track.id 带 bili: 前缀");
+check(sb.tracks.every((t) => t.album && /^https?:\/\//.test(t.album.imageUrl)), "B站封面为绝对 http(s) 地址");
+const bt = sb.tracks[0];
+if (bt) {
+  line("stream bili high: " + bt.id + " " + bt.name);
+  const stb = await mod.stream({ id: bt.id, quality: "high" });
+  console.log("  type:", stb.type, "bitRate:", stb.bitRate, "url:", (stb.url || "").slice(0, 60));
+  check(stb.type === "m4a", "B站返回 m4a");
+  check(stb.headers && /bilibili\.com/.test(stb.headers.Referer), "B站 Referer 正确");
+  await probeAudio(stb, "bili high");
+  const lyb = await mod.lyrics({ id: bt.id });
+  check(lyb.lrc === "", "B站歌词为空字符串（无歌词源）");
+}
+SETTINGS = {};
+
+// ---------- 9. 空查询 / 其他 kind ----------
 line("边界：空查询 & 非 tracks kind");
 const e1 = await mod.search({ query: "", kind: "tracks", offset: 0 });
 check(e1.tracks.length === 0 && e1.more === false, "空查询返回空");
