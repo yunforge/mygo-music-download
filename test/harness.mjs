@@ -52,6 +52,20 @@ function check(cond, msg) {
   }
 }
 
+// 内建源偶发瞬时空结果/取流失败，包一层重试让测试稳定（不改变断言含义）
+async function streamRetry(id, quality, tries = 3) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await mod.stream({ id, quality });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  throw lastErr;
+}
+
 // 允许直接 fetch（node 24 自带），用于验证直链音频（带 Referer）
 async function probeAudio(stream, label) {
   try {
@@ -92,28 +106,35 @@ check(overlap.length === 0, "第二页与第一页无重复 (重复数=" + overl
 // ---------- 2. stream lossless ----------
 const pick = s1.tracks.find((t) => t.id.startsWith("wyy:")) || s1.tracks[0];
 line("stream lossless: " + pick.id + " " + pick.name);
-const st = await mod.stream({ id: pick.id, quality: "lossless" });
-console.log("  type:", st.type, "bitRate:", st.bitRate, "size:", st.size);
+const st = await streamRetry(pick.id, "lossless");
+console.log("  type:", st.type, "bitRate:", st.bitRate, "size:", st.size, "quality:", st.quality);
 console.log("  url:", st.url.slice(0, 70) + "...");
 console.log("  headers:", JSON.stringify(st.headers));
 check(st.type === "flac", "lossless 返回 flac");
+check(st.quality === "lossless", "返回 quality 标为 lossless");
 check(typeof st.url === "string" && st.url.startsWith("http"), "url 是 http(s) 直链");
 check(st.headers && st.headers.Referer, "headers 带 Referer");
 check(typeof st.size === "number" && st.size > 0, "size 解析为字节数");
 await probeAudio(st, "lossless");
 
-// ---------- 3. stream high / standard ----------
-line("stream high");
-const sth = await mod.stream({ id: pick.id, quality: "high" });
-console.log("  type:", sth.type, "bitRate:", sth.bitRate);
-check(sth.type === "mp3", "high 返回 mp3");
+// ---------- 3. 默认无损 & 音质设置覆盖 ----------
+line("默认（未设置）：App 传 high 也应下到 flac");
+SETTINGS = {};
+const stDefault = await streamRetry(pick.id, "high");
+console.log("  type:", stDefault.type, "quality:", stDefault.quality);
+check(stDefault.type === "flac", "默认无损失效（即使 App 传 high）");
 
-// 插件设置的 quality 覆盖 App 传入的音质
-line("插件设置 quality=lossless 覆盖 App 的 high");
-SETTINGS = { quality: "lossless" };
-const stq = await mod.stream({ id: pick.id, quality: "high" });
-console.log("  type:", stq.type);
-check(stq.type === "flac", "设置覆盖生效：high 请求被强制为 flac");
+line("设置 quality=high → 强制 MP3 320");
+SETTINGS = { quality: "high" };
+const sth = await streamRetry(pick.id, "lossless");
+console.log("  type:", sth.type, "bitRate:", sth.bitRate, "quality:", sth.quality);
+check(sth.type === "mp3", "high 设置返回 mp3");
+
+line("设置 quality=standard → 强制 MP3 128");
+SETTINGS = { quality: "standard" };
+const sts = await streamRetry(pick.id, "lossless");
+console.log("  type:", sts.type, "bitRate:", sts.bitRate, "quality:", sts.quality);
+check(sts.type === "mp3", "standard 设置返回 mp3");
 SETTINGS = {};
 
 // ---------- 4. lyrics ----------
@@ -138,6 +159,12 @@ if (withAlbum) {
 line("home removed");
 check(typeof mod.home !== "function", "已移除 home()，只保留热门榜单页");
 
+line("settings：搜索固定 all，音质默认无损");
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "plugin.json"), "utf8"));
+const settingKeys = (manifest.settings || []).map((s) => s.key);
+check(!settingKeys.includes("platform"), "已移除「搜索来源(platform)」设置（固定多站合一 all）");
+check(settingKeys.includes("quality"), "保留「quality」设置");
+
 line("browse charts");
 const bc = await mod.browse({ page: "charts" });
 const wySec = bc.sections.find((sec) => sec.links && sec.links.some((l) => /playlist:wyy:/.test(l.page)));
@@ -154,21 +181,13 @@ const bp = await mod.browse({ page: "playlist:wyy:3778678" });
 console.log("  title:", bp.title, "tracks:", bp.sections[0].tracks.length, "morePage:", bp.sections[0].morePage);
 check(bp.sections[0].tracks.length > 0, "歌单页有曲目");
 
-// ---------- 7. kuwo 单站模式 ----------
-line("search kuwo 单站: hello");
-SETTINGS = { platform: "kuwo" };
-const sk = await mod.search({ query: "hello", kind: "tracks", offset: 0 });
-console.log("  tracks:", sk.tracks.length, "first:", sk.tracks[0] && sk.tracks[0].name);
-check(sk.tracks.length > 0 && sk.tracks.every((t) => t.id.startsWith("kuwo:")), "kuwo 单站仅返回 kuwo 结果");
-
-line("stream kuwo lossless: " + (sk.tracks[0] && sk.tracks[0].id));
-if (sk.tracks[0]) {
-  const stk = await mod.stream({ id: sk.tracks[0].id, quality: "lossless" });
-  console.log("  type:", stk.type, "bitRate:", stk.bitRate);
-  check(stk.type === "flac", "kuwo lossless 返回 flac");
-  check(/kuwo\.cn/.test(stk.headers.Referer), "kuwo Referer 正确");
-  await probeAudio(stk, "kuwo lossless");
-}
+// ---------- 7. 酷我来源的音源可播放/下载（固定已知 id，验证多站取流） ----------
+line("stream kuwo lossless（固定 id: kuwo:6686351 Hello）");
+const stk = await streamRetry("kuwo:6686351", "lossless");
+console.log("  type:", stk.type, "bitRate:", stk.bitRate, "quality:", stk.quality);
+check(stk.type === "flac", "kuwo lossless 返回 flac");
+check(/kuwo\.cn/.test(stk.headers.Referer), "kuwo Referer 正确");
+await probeAudio(stk, "kuwo lossless");
 
 // ---------- 8. 歌单：创建 / 添加(右键) / 读取 / 改名 / 排序 / 移除 / 删除 ----------
 line("playlists: create");

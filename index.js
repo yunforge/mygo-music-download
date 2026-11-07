@@ -3,10 +3,10 @@
 // 导出能力：browse, search, album, stream, lyrics，以及「我的歌单」增删改查
 //
 // 架构说明：
-//   search —— 按设置里的 platform（all / wyy / kuwo）检索歌曲，支持分页（offset）。
-//   stream —— 播放 / 下载共用。按 quality 选择音源：
-//             lossless → flac；high → mp3 320；standard → mp3 128。
-//             可在插件设置里用 quality 覆盖 App 全局音质；留空则跟随 App。
+//   search —— 固定「多站合一」（网易云 + 酷我）检索歌曲，支持分页（offset）。
+//   stream —— 播放 / 下载共用。默认音质为无损：
+//             lossless → FLAC；没有 FLAC 时自动回退到最高音质 MP3（320）。
+//             可在插件设置里用 quality 覆盖（high = MP3 320，standard = MP3 128）。
 //             返回的 type 决定下载文件扩展名，因此“无损”质量会下载到 .flac 文件。
 //   lyrics —— 拉取 LRC 歌词。
 //   album  —— 专辑详情 + 曲目。
@@ -111,27 +111,16 @@ async function mapLimit(items, limit, fn) {
   return res;
 }
 
-// 读取设置里的搜索来源：wyy / kuwo / all（默认 all）
-function currentMode() {
-  let v = "";
-  try {
-    v = String(host.setting("platform") || "").trim().toLowerCase();
-  } catch (e) {}
-  if (/^(kuwo|k|2|酷我|酷我音乐)$/.test(v)) return "kuwo";
-  if (/^(wyy|w|1|netease|网易|网易云|网易云音乐)$/.test(v)) return "wyy";
-  return "all";
-}
-
-// 插件内“下载音质”设置：覆盖 App 的全局音质；留空则跟随 App
+// 插件内“下载音质”设置：覆盖 App 的全局音质；默认（留空）= 无损。
 function settingQuality() {
   let v = "";
   try {
     v = String(host.setting("quality") || "").trim().toLowerCase();
   } catch (e) {}
-  if (/^(lossless|flac|无损|sq)$/.test(v)) return "lossless";
   if (/^(high|320|hq|高音质|高)$/.test(v)) return "high";
   if (/^(standard|128|std|标准)$/.test(v)) return "standard";
-  return "";
+  // 默认（含 lossless / 留空）：优先无损 FLAC；没有 FLAC 时由 pickMinfo 回退到最高 MP3
+  return "lossless";
 }
 
 // id 形如 "<platform>:<songId>" / "<platform>:<albumId>"
@@ -231,36 +220,28 @@ async function totalOf(platform, keyword) {
   }
 }
 
+// 固定「多站合一」：先网易云，再酷我，连续无空洞，保证 offset 分页语义正确。
 async function doSearch(keyword, offset) {
-  const mode = currentMode();
   const count = PAGE;
-  if (mode === "all") {
-    const totals = await Promise.all([totalOf("wyy", keyword), totalOf("kuwo", keyword)]);
-    const wyyTotal = totals[0];
-    const kuwoTotal = totals[1];
-    const combinedTotal = wyyTotal + kuwoTotal;
-    const end = Math.min(offset + count, combinedTotal);
-    const tracks = [];
-    // 合并顺序：先网易云，再酷我（连续、无空洞，保证 offset 语义正确）
-    const wa0 = offset;
-    const wa1 = Math.min(end, wyyTotal);
-    if (wa1 > wa0) {
-      const r = await fetchRange("wyy", keyword, wa0, wa1 - wa0);
-      for (const it of r.items) tracks.push(songToTrack("wyy", it));
-    }
-    const ka0 = Math.max(offset, wyyTotal);
-    const ka1 = end;
-    if (ka1 > ka0) {
-      const r = await fetchRange("kuwo", keyword, ka0 - wyyTotal, ka1 - ka0);
-      for (const it of r.items) tracks.push(songToTrack("kuwo", it));
-    }
-    return { tracks: tracks, more: offset + count < combinedTotal };
+  const totals = await Promise.all([totalOf("wyy", keyword), totalOf("kuwo", keyword)]);
+  const wyyTotal = totals[0];
+  const kuwoTotal = totals[1];
+  const combinedTotal = wyyTotal + kuwoTotal;
+  const end = Math.min(offset + count, combinedTotal);
+  const tracks = [];
+  const wa0 = offset;
+  const wa1 = Math.min(end, wyyTotal);
+  if (wa1 > wa0) {
+    const r = await fetchRange("wyy", keyword, wa0, wa1 - wa0);
+    for (const it of r.items) tracks.push(songToTrack("wyy", it));
   }
-  const r = await fetchRange(mode, keyword, offset, count);
-  return {
-    tracks: r.items.map((it) => songToTrack(mode, it)),
-    more: offset + count < r.total,
-  };
+  const ka0 = Math.max(offset, wyyTotal);
+  const ka1 = end;
+  if (ka1 > ka0) {
+    const r = await fetchRange("kuwo", keyword, ka0 - wyyTotal, ka1 - ka0);
+    for (const it of r.items) tracks.push(songToTrack("kuwo", it));
+  }
+  return { tracks: tracks, more: offset + count < combinedTotal };
 }
 
 export async function search({ query, kind, offset }) {
@@ -292,14 +273,14 @@ export async function album({ id }) {
   };
 }
 
-// 依据质量挑音源：lossless→flac，high→mp3 320，standard→mp3 128
+// 依据质量挑音源：lossless→flac（无则回退最高 MP3），high→mp3 320，standard→mp3 128
 function pickMinfo(minfo, quality) {
   const list = Array.isArray(minfo) ? minfo.filter((m) => m && m.format) : [];
   const flac = list.find((m) => m.format === "flac");
   const mp3 = list.filter((m) => m.format === "mp3");
   const mp3_320 = mp3.find((m) => String(m.bitrate) === "320") || mp3[0];
   const mp3_128 = mp3.find((m) => String(m.bitrate) === "128") || mp3[mp3.length - 1];
-  if (quality === "lossless") return flac || mp3_320 || null;
+  if (quality === "lossless") return flac || mp3_320 || null; // 无无损 → 最高 MP3
   if (quality === "standard") return mp3_128 || mp3_320 || flac || null;
   return mp3_320 || flac || null; // high
 }
@@ -343,8 +324,8 @@ async function withFreshSong(platform, songId, attempts, deadlineMs, fn) {
 }
 
 export async function stream({ id, quality }) {
-  // 插件设置里的音质优先，其次用 App 传入的，最后默认 high
-  quality = settingQuality() || quality || "high";
+  // 插件设置里的音质优先；默认（未设置）为无损；更次用 App 传入的
+  quality = settingQuality() || quality || "lossless";
   const p = parseId(id);
   if (p.platform !== "wyy" && p.platform !== "kuwo") {
     throw fail("unavailable", "invalid track id");
@@ -368,10 +349,17 @@ export async function stream({ id, quality }) {
       remain()
     );
     if (!u || !u.url) throw fail("unavailable", "no download url");
+    // 实际音质（可能回退：例如没有 FLAC 时下载到 MP3 320）
+    const actualQuality =
+      info.format === "flac"
+        ? "lossless"
+        : String(info.bitrate) === "320"
+        ? "high"
+        : "standard";
     return {
       url: u.url,
       type: u.format || info.format || "mp3",
-      quality: quality,
+      quality: actualQuality,
       bitRate: Number(info.bitrate) || undefined,
       size: parseSize(info.size),
       headers: { Referer: referer, "User-Agent": UA },
