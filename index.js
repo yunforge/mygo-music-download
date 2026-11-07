@@ -226,19 +226,35 @@ function biliPic(p) {
 
 async function biliSearchPage(keyword, page) {
   const cookie = await biliCookie();
-  const url =
-    BILI +
-    "/x/web-interface/search/type?search_type=video&keyword=" +
-    encodeURIComponent(keyword) +
-    "&page=" +
-    page;
-  const r = await fetch(url, { headers: biliHeaders(cookie) });
-  const j = await r.json().catch(() => ({}));
-  if (!j || j.code !== 0) {
-    throw fail("unavailable", "bili search: " + (j && (j.message || j.code)));
+  const enc = encodeURIComponent(keyword);
+  // 首选 search/type；被风控(-412)或空结果时退回 search/all/v2（其 result 为分组，video 组即视频列表）
+  let j = null;
+  try {
+    const r = await fetch(
+      BILI + "/x/web-interface/search/type?search_type=video&keyword=" + enc + "&page=" + page,
+      { headers: biliHeaders(cookie) }
+    );
+    j = await r.json().catch(() => ({}));
+  } catch (e) {
+    j = null;
   }
-  const data = j.data || {};
-  return { list: data.result || [], total: Number(data.numResults) || 0 };
+  if (j && j.code === 0 && j.data && Array.isArray(j.data.result) && j.data.result.length) {
+    return { list: j.data.result, total: Number(j.data.numResults) || 0 };
+  }
+  const r2 = await fetch(
+    BILI + "/x/web-interface/search/all/v2?keyword=" + enc + "&page=" + page,
+    { headers: biliHeaders(cookie) }
+  );
+  const j2 = await r2.json().catch(() => ({}));
+  if (!j2 || j2.code !== 0 || !j2.data) {
+    throw fail(
+      "unavailable",
+      "bili search: " + ((j && (j.message || j.code)) || (j2 && (j2.message || j2.code)) || "unknown")
+    );
+  }
+  const groups = j2.data.result || [];
+  const vg = groups.find((x) => x && x.result_type === "video");
+  return { list: (vg && vg.data) || [], total: Number(j2.data.numResults) || 0 };
 }
 
 async function fetchBiliRange(keyword, start, count) {

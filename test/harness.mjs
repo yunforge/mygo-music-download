@@ -69,7 +69,12 @@ async function probeAudio(stream, label) {
 // ---------- 1. all 模式搜索（默认） ----------
 line("search all 模式: 周杰伦 (offset=0)");
 SETTINGS = {};
-const s1 = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+let s1 = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+// 内建源偶发冷启动空结果，重试几次（不改变断言含义）
+for (let i = 0; i < 3 && s1.tracks.length === 0; i++) {
+  await new Promise((r) => setTimeout(r, 1500));
+  s1 = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+}
 console.log("  tracks:", s1.tracks.length, "more:", s1.more);
 console.log("  前5:", s1.tracks.slice(0, 5).map((t) => t.id + " " + t.name).join(" | "));
 check(s1.tracks.length > 0, "返回了歌曲");
