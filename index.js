@@ -17,7 +17,9 @@
 
 const API_BASE = "https://flac.music.hi.cn/ajax.php?act=";
 const PAGE = 20;
-const REQUEST_TIMEOUT = 15000; // 单次外部请求超时（毫秒）
+const REQUEST_TIMEOUT = 8000; // 单次外部请求超时（毫秒）
+const STREAM_DEADLINE = 25000; // stream 整体预算，须小于宿主 30s 调用超时
+const LYRICS_DEADLINE = 18000; // lyrics 整体预算
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -53,9 +55,14 @@ function enc(params) {
     .join("&");
 }
 
-async function api(act, params) {
+// timeoutMs：本次请求的独立超时；缺省用 REQUEST_TIMEOUT，且不会超过它。
+async function api(act, params, timeoutMs) {
+  const to =
+    typeof timeoutMs === "number"
+      ? Math.max(1000, Math.min(timeoutMs, REQUEST_TIMEOUT))
+      : REQUEST_TIMEOUT;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+  const timer = setTimeout(() => ctrl.abort(), to);
   let res;
   try {
     res = await fetch(API_BASE + act, {
@@ -83,6 +90,25 @@ async function api(act, params) {
     throw fail("unavailable", (json && json.msg) || act + " failed");
   }
   return json.data;
+}
+
+// 限制并发地 map：最多 limit 个 fn 同时在飞，保持结果顺序；单项失败记为 null。
+async function mapLimit(items, limit, fn) {
+  const res = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        res[i] = await fn(items[i], i);
+      } catch (e) {
+        res[i] = null;
+      }
+    }
+  };
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return res;
 }
 
 // 读取设置里的搜索来源：wyy / kuwo / all（默认 all）
@@ -144,6 +170,8 @@ function cacheGet(platform, keyword, page) {
   return c && c.exp > Date.now() ? c : null;
 }
 function cacheSetPage1(platform, keyword, list, total) {
+  // 不做空结果负缓存：冷启动/瞬时失败返回的空列表不应被记住，否则会抵消重试。
+  if (!Array.isArray(list) || list.length === 0) return;
   if (searchCache.size > 100) searchCache.clear();
   searchCache.set(platform + "|" + keyword, {
     list: list,
@@ -190,12 +218,12 @@ async function fetchRange(platform, keyword, start, count) {
 
 async function totalOf(platform, keyword) {
   const cached = cacheGet(platform, keyword, 1);
-  if (cached) return cached.list.length === 0 ? 0 : cached.total || cached.list.length;
+  if (cached) return cached.total || cached.list.length;
   try {
     const d = await api("search", { platform: platform, keyword: keyword, page: 1, size: PAGE });
     const list = (d && d.list) || [];
     const total = Number(d && d.total) || 0;
-    cacheSetPage1(platform, keyword, list, total);
+    cacheSetPage1(platform, keyword, list, total); // 空列表不会被缓存
     if (list.length === 0) return 0; // 处理“total>0 但列表为空”的站点怪癖
     return total || list.length;
   } catch (e) {
@@ -289,6 +317,31 @@ function parseSize(s) {
   return Math.round(n * mult);
 }
 
+// 反复取最新的 act=song（time/sign 会过期、偶发一次无效），再执行 fn(item, remain)。
+// remain() 返回“距总 deadline 的剩余毫秒”，供后续请求作为超时，保证整体不超宿主调用上限。
+async function withFreshSong(platform, songId, attempts, deadlineMs, fn) {
+  let lastErr;
+  const deadline = Date.now() + deadlineMs;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      const wait = 300 * attempt;
+      if (Date.now() + wait >= deadline) break;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    const rem = deadline - Date.now();
+    if (rem < 1500) break;
+    try {
+      const d = await api("song", { platform: platform, id: songId }, rem);
+      const item = ((d && d.list) || [])[0];
+      if (!item) throw fail("unavailable", "song not found");
+      return await fn(item, () => Math.max(1000, deadline - Date.now()));
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || fail("unavailable", "request failed");
+}
+
 export async function stream({ id, quality }) {
   // 插件设置里的音质优先，其次用 App 传入的，最后默认 high
   quality = settingQuality() || quality || "high";
@@ -298,63 +351,51 @@ export async function stream({ id, quality }) {
   }
   const songId = p.id;
   const referer = p.platform === "kuwo" ? "https://www.kuwo.cn/" : "https://music.163.com/";
-  // time/sign 会过期，且偶发一次无效（冷启动/瞬时）。每次重试都重新取 song 拿新 token。
-  let lastErr;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
-    try {
-      const d = await api("song", { platform: p.platform, id: songId });
-      const item = ((d && d.list) || [])[0];
-      if (!item) throw fail("unavailable", "song not found");
-      const info = pickMinfo(item.minfo, quality);
-      if (!info) throw fail("unavailable", "no source for quality: " + quality);
-      const u = await api("getUrl", {
+  // 总耗时限制在 STREAM_DEADLINE 内，避免超过宿主 30s 调用超时。
+  return withFreshSong(p.platform, songId, 4, STREAM_DEADLINE, async (item, remain) => {
+    const info = pickMinfo(item.minfo, quality);
+    if (!info) throw fail("unavailable", "no source for quality: " + quality);
+    const u = await api(
+      "getUrl",
+      {
         platform: p.platform,
         songid: songId,
         format: info.format,
         bitrate: info.bitrate,
         time: item.time,
         sign: item.sign,
-      });
-      if (!u || !u.url) throw fail("unavailable", "no download url");
-      return {
-        url: u.url,
-        type: u.format || info.format || "mp3",
-        quality: quality,
-        bitRate: Number(info.bitrate) || undefined,
-        size: parseSize(info.size),
-        headers: { Referer: referer, "User-Agent": UA },
-      };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || fail("unavailable", "stream failed");
+      },
+      remain()
+    );
+    if (!u || !u.url) throw fail("unavailable", "no download url");
+    return {
+      url: u.url,
+      type: u.format || info.format || "mp3",
+      quality: quality,
+      bitRate: Number(info.bitrate) || undefined,
+      size: parseSize(info.size),
+      headers: { Referer: referer, "User-Agent": UA },
+    };
+  });
 }
 
 export async function lyrics({ id }) {
   const p = parseId(id);
   if (p.platform !== "wyy" && p.platform !== "kuwo") return { lrc: "" };
-  const songId = p.id;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
-    try {
-      const d = await api("song", { platform: p.platform, id: songId });
-      const item = ((d && d.list) || [])[0];
-      if (!item) continue;
-      const data = await api("getLyric", {
-        platform: p.platform,
-        songid: songId,
-        time: item.time,
-        sign: item.sign,
-      });
+  try {
+    return await withFreshSong(p.platform, p.id, 3, LYRICS_DEADLINE, async (item, remain) => {
+      const data = await api(
+        "getLyric",
+        { platform: p.platform, songid: p.id, time: item.time, sign: item.sign },
+        remain()
+      );
       const lrc = typeof data === "string" ? data : (data && (data.lrc || data.lyric || "")) || "";
-      if (lrc) return { lrc: lrc };
-    } catch (e) {
-      // 重试
-    }
+      if (!lrc) throw fail("unavailable", "no lyrics"); // 空歌词视为失败，继续重试
+      return { lrc: lrc };
+    });
+  } catch (e) {
+    return { lrc: "" };
   }
-  return { lrc: "" };
 }
 
 // 网易云榜单链接（带封面，向接口取每个歌单的 pic_url）
@@ -540,9 +581,9 @@ export async function addToPlaylist({ id, trackIds }) {
     const key = String(tid);
     if (!have.has(key) && missing.indexOf(key) < 0) missing.push(key);
   }
-  // 并发解析缺失曲目，避免逐个 await 造成的 N+1 串行请求
+  // 有界并发解析缺失曲目（每批 5 个），避免一次性几十个请求触发限流
   if (missing.length) {
-    const resolved = await Promise.all(missing.map((k) => resolveTrackById(k).catch(() => null)));
+    const resolved = await mapLimit(missing, 5, (k) => resolveTrackById(k));
     for (let i = 0; i < missing.length; i++) {
       const tr = resolved[i];
       if (tr) {
