@@ -244,6 +244,104 @@ try {
 }
 check(invalidThrew, "非法/已移除来源的 track id 明确报 unavailable");
 
+// ---------- 10. 单元：flac 取流失败 → 自动回退 mp3 320 ----------
+line("unit: 无损音源取流失败 → 自动回退 mp3 320");
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const act = String(url).split("act=")[1];
+    if (act === "song") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          code: 0,
+          data: {
+            list: [
+              {
+                id: "999",
+                name: "X",
+                artist: "Y",
+                album_name: "A",
+                album_id: "1",
+                pic_url: "",
+                duration: 200,
+                minfo: [
+                  { format: "flac", bitrate: "900", size: "30MB" },
+                  { format: "mp3", bitrate: "320", size: "3MB" },
+                ],
+                time: 1,
+                sign: "s",
+              },
+            ],
+          },
+        }),
+      };
+    }
+    if (act === "getUrl") {
+      const body = String((opts && opts.body) || "");
+      if (/format=flac/.test(body)) {
+        return { ok: true, status: 200, json: async () => ({ code: -1, msg: "flac unavailable" }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, data: { url: "http://cdn.example/x.mp3", format: "mp3", bitrate: "320" } }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ code: 0, data: {} }) };
+  };
+  try {
+    SETTINGS = {};
+    const r = await mod.stream({ id: "wyy:999", quality: "lossless" });
+    check(
+      r.type === "mp3" && String(r.bitRate) === "320",
+      "flac 取流失败后回退到 mp3 320 (type=" + r.type + ", bitRate=" + r.bitRate + ")"
+    );
+  } catch (e) {
+    check(false, "回退 mp3 失败: " + e.message);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// ---------- 11. 单元：搜索上游首次失败自动重试 ----------
+line("unit: 搜索上游偶发失败 → 自动重试");
+{
+  const realFetch = globalThis.fetch;
+  let wyyFailsLeft = 1;
+  globalThis.fetch = async (url, opts) => {
+    const body = String((opts && opts.body) || "");
+    const platform = (/platform=(\w+)/.exec(body) || [])[1] || "";
+    const page = (/[?&]?page=(\d+)/.exec(body) || [])[1] || "1";
+    if (platform === "wyy" && page === "1" && wyyFailsLeft-- > 0) {
+      throw new Error("transient network");
+    }
+    const item = {
+      id: platform === "wyy" ? "1" : "2",
+      name: platform,
+      artist: "a",
+      album_name: "b",
+      album_id: "9",
+      pic_url: "",
+      duration: 100,
+      minfo: [],
+      time: 1,
+      sign: "s",
+    };
+    return { ok: true, status: 200, json: async () => ({ code: 0, data: { list: [item], total: 1 } }) };
+  };
+  try {
+    SETTINGS = {};
+    const r = await mod.search({ query: "unit-retry", kind: "tracks", offset: 0 });
+    check(r.tracks.length === 2, "上游首次失败后重试成功，返回两站结果 (n=" + r.tracks.length + ")");
+  } catch (e) {
+    check(false, "搜索重试失败: " + e.message);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log("\n========================================");
 console.log(failures === 0 ? "全部通过 ✅" : "有 " + failures + " 项失败 ❌");
 process.exit(failures === 0 ? 0 : 1);

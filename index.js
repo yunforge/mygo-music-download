@@ -92,6 +92,25 @@ async function api(act, params, timeoutMs) {
   return json.data;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// 对上游偶发抖动做有限次重试（用于 search 这类可幂等请求）。timeoutMs 同上。
+async function apiRetry(act, params, timeoutMs, tries) {
+  tries = tries || 3;
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await api(act, params, timeoutMs);
+    } catch (e) {
+      last = e;
+      if (i < tries - 1) await sleep(200 * (i + 1));
+    }
+  }
+  throw last;
+}
+
 // 限制并发地 map：最多 limit 个 fn 同时在飞，保持结果顺序；单项失败记为 null。
 async function mapLimit(items, limit, fn) {
   const res = new Array(items.length);
@@ -186,7 +205,7 @@ async function fetchRange(platform, keyword, start, count) {
     } else {
       let d;
       try {
-        d = await api("search", { platform: platform, keyword: keyword, page: p, size: PAGE });
+        d = await apiRetry("search", { platform: platform, keyword: keyword, page: p, size: PAGE });
       } catch (e) {
         break; // 某站失败不影响另一站
       }
@@ -209,7 +228,7 @@ async function totalOf(platform, keyword) {
   const cached = cacheGet(platform, keyword, 1);
   if (cached) return cached.total || cached.list.length;
   try {
-    const d = await api("search", { platform: platform, keyword: keyword, page: 1, size: PAGE });
+    const d = await apiRetry("search", { platform: platform, keyword: keyword, page: 1, size: PAGE });
     const list = (d && d.list) || [];
     const total = Number(d && d.total) || 0;
     cacheSetPage1(platform, keyword, list, total); // 空列表不会被缓存
@@ -273,16 +292,36 @@ export async function album({ id }) {
   };
 }
 
-// 依据质量挑音源：lossless→flac（无则回退最高 MP3），high→mp3 320，standard→mp3 128
-function pickMinfo(minfo, quality) {
+// 依据质量给出“有序候选音源”列表（前一个取流失败会继续试后面的）：
+//   lossless → flac(s) → mp3（320 优先）
+//   high     → mp3 320 → 其它 mp3 → flac（兜底）
+//   standard → mp3 128 → 其它 mp3 → flac（兜底）
+// 这样既能在“根本没有无损”时回退 MP3，也能在“有无损但该无损取流失败”时继续退到 MP3。
+function pickCandidates(minfo, quality) {
   const list = Array.isArray(minfo) ? minfo.filter((m) => m && m.format) : [];
-  const flac = list.find((m) => m.format === "flac");
-  const mp3 = list.filter((m) => m.format === "mp3");
-  const mp3_320 = mp3.find((m) => String(m.bitrate) === "320") || mp3[0];
-  const mp3_128 = mp3.find((m) => String(m.bitrate) === "128") || mp3[mp3.length - 1];
-  if (quality === "lossless") return flac || mp3_320 || null; // 无无损 → 最高 MP3
-  if (quality === "standard") return mp3_128 || mp3_320 || flac || null;
-  return mp3_320 || flac || null; // high
+  const flacs = list.filter((m) => m.format === "flac");
+  const mp3s = list
+    .filter((m) => m.format === "mp3")
+    .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0)); // 高码率优先
+  const byBitrate = (br) => mp3s.find((m) => String(m.bitrate) === String(br));
+  const order = [];
+  const add = (m) => {
+    if (m && order.indexOf(m) < 0) order.push(m);
+  };
+  if (quality === "high") {
+    add(byBitrate(320) || mp3s[0]);
+    mp3s.forEach(add);
+    flacs.forEach(add);
+  } else if (quality === "standard") {
+    add(byBitrate(128) || mp3s[mp3s.length - 1]);
+    mp3s.forEach(add);
+    flacs.forEach(add);
+  } else {
+    // lossless（默认）
+    flacs.forEach(add);
+    mp3s.forEach(add);
+  }
+  return order;
 }
 
 function parseSize(s) {
@@ -318,14 +357,16 @@ async function withFreshSong(platform, songId, attempts, deadlineMs, fn) {
       return await fn(item, () => Math.max(1000, deadline - Date.now()));
     } catch (e) {
       lastErr = e;
+      if (e && e.noRetry) throw e; // 永久性错误（如无任何音源）：不再重试
     }
   }
   throw lastErr || fail("unavailable", "request failed");
 }
 
-export async function stream({ id, quality }) {
-  // 插件设置里的音质优先；默认（未设置）为无损；更次用 App 传入的
-  quality = settingQuality() || quality || "lossless";
+export async function stream({ id }) {
+  // 音质策略由插件设置决定：默认（未设置）= 无损；high = MP3 320；standard = MP3 128。
+  // 这是本插件的产品选择（默认无损并覆盖 App 全局音质），因此不再读取 App 传入的 quality。
+  const want = settingQuality();
   const p = parseId(id);
   if (p.platform !== "wyy" && p.platform !== "kuwo") {
     throw fail("unavailable", "invalid track id");
@@ -334,36 +375,50 @@ export async function stream({ id, quality }) {
   const referer = p.platform === "kuwo" ? "https://www.kuwo.cn/" : "https://music.163.com/";
   // 总耗时限制在 STREAM_DEADLINE 内，避免超过宿主 30s 调用超时。
   return withFreshSong(p.platform, songId, 4, STREAM_DEADLINE, async (item, remain) => {
-    const info = pickMinfo(item.minfo, quality);
-    if (!info) throw fail("unavailable", "no source for quality: " + quality);
-    const u = await api(
-      "getUrl",
-      {
-        platform: p.platform,
-        songid: songId,
-        format: info.format,
-        bitrate: info.bitrate,
-        time: item.time,
-        sign: item.sign,
-      },
-      remain()
-    );
-    if (!u || !u.url) throw fail("unavailable", "no download url");
-    // 实际音质（可能回退：例如没有 FLAC 时下载到 MP3 320）
-    const actualQuality =
-      info.format === "flac"
-        ? "lossless"
-        : String(info.bitrate) === "320"
-        ? "high"
-        : "standard";
-    return {
-      url: u.url,
-      type: u.format || info.format || "mp3",
-      quality: actualQuality,
-      bitRate: Number(info.bitrate) || undefined,
-      size: parseSize(info.size),
-      headers: { Referer: referer, "User-Agent": UA },
-    };
+    const candidates = pickCandidates(item.minfo, want);
+    if (candidates.length === 0) {
+      // 确实没有任何可用音源：重新取签名也没用，直接放弃（不触发 4 次重试）
+      const e = fail("unavailable", "no source for quality: " + want);
+      e.noRetry = true;
+      throw e;
+    }
+    let lastErr;
+    // 依次尝试每个候选音源：某档取流失败（无版权/VIP/瞬时）就退到下一档
+    for (const info of candidates) {
+      try {
+        const u = await api(
+          "getUrl",
+          {
+            platform: p.platform,
+            songid: songId,
+            format: info.format,
+            bitrate: info.bitrate,
+            time: item.time,
+            sign: item.sign,
+          },
+          remain()
+        );
+        if (!u || !u.url) throw fail("unavailable", "no download url");
+        // 实际音质（可能回退：例如没有 FLAC 或 FLAC 取流失败时下载到 MP3 320）
+        const actualQuality =
+          info.format === "flac"
+            ? "lossless"
+            : String(info.bitrate) === "320"
+            ? "high"
+            : "standard";
+        return {
+          url: u.url,
+          type: u.format || info.format || "mp3",
+          quality: actualQuality,
+          bitRate: Number(info.bitrate) || undefined,
+          size: parseSize(info.size),
+          headers: { Referer: referer, "User-Agent": UA },
+        };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || fail("unavailable", "no download url");
   });
 }
 
