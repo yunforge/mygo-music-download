@@ -20,6 +20,7 @@ const PAGE = 20;
 const REQUEST_TIMEOUT = 8000; // 单次外部请求超时（毫秒）
 const STREAM_DEADLINE = 25000; // stream 整体预算，须小于宿主 30s 调用超时
 const LYRICS_DEADLINE = 18000; // lyrics 整体预算
+const SEARCH_DEADLINE = 25000; // search 整体预算（totalOf + 两站 fetchRange）
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -43,7 +44,7 @@ function t(s) {
 
 function fail(code, message) {
   const e = new Error(message);
-  e.code = code; // signIn | setup | unavailable | unsupported
+  e.code = code; // 当前只用 unavailable
   return e;
 }
 
@@ -96,16 +97,22 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// 对上游偶发抖动做有限次重试（用于 search 这类可幂等请求）。timeoutMs 同上。
-async function apiRetry(act, params, timeoutMs, tries) {
+// 对上游偶发抖动做有限次重试（用于 search 这类可幂等请求）。
+// timeoutMs 同 api()；remain() 可选，返回距总 deadline 的剩余毫秒，
+// 每次尝试（含重试）都用当时的剩余值作为本次超时，剩余预算不足以再试时提前放弃。
+async function apiRetry(act, params, timeoutMs, tries, remain) {
   tries = tries || 3;
   let last;
   for (let i = 0; i < tries; i++) {
     try {
-      return await api(act, params, timeoutMs);
+      return await api(act, params, remain ? remain() : timeoutMs);
     } catch (e) {
       last = e;
-      if (i < tries - 1) await sleep(200 * (i + 1));
+      if (i < tries - 1) {
+        const wait = 200 * (i + 1);
+        if (remain && remain() < wait + 1000) break;
+        await sleep(wait);
+      }
     }
   }
   throw last;
@@ -180,7 +187,8 @@ function cacheGet(platform, keyword, page) {
 function cacheSetPage1(platform, keyword, list, total) {
   // 不做空结果负缓存：冷启动/瞬时失败返回的空列表不应被记住，否则会抵消重试。
   if (!Array.isArray(list) || list.length === 0) return;
-  if (searchCache.size > 100) searchCache.clear();
+  // Map 保持插入序：容量满时逐条淘汰最旧项，而不是全量清空
+  while (searchCache.size >= 100) searchCache.delete(searchCache.keys().next().value);
   searchCache.set(platform + "|" + keyword, {
     list: list,
     total: total,
@@ -188,11 +196,11 @@ function cacheSetPage1(platform, keyword, list, total) {
   });
 }
 
-// 按绝对下标 [start, start+count) 拉取某平台搜索结果
-async function fetchRange(platform, keyword, start, count) {
+// 按绝对下标 [start, start+count) 拉取某平台搜索结果。remain 同 apiRetry。
+// 返回的 total 统一处理站点怪癖：total>0 但列表为空 → 0；接口未给 total → 以列表长度兜底。
+async function fetchRange(platform, keyword, start, count, remain) {
   const out = [];
   let total = 0;
-  if (count <= 0) return { items: out, total };
   const firstPage = Math.floor(start / PAGE) + 1;
   const lastPage = Math.floor((start + count - 1) / PAGE) + 1;
   for (let p = firstPage; p <= lastPage; p++) {
@@ -205,7 +213,7 @@ async function fetchRange(platform, keyword, start, count) {
     } else {
       let d;
       try {
-        d = await apiRetry("search", { platform: platform, keyword: keyword, page: p, size: PAGE });
+        d = await apiRetry("search", { platform: platform, keyword: keyword, page: p, size: PAGE }, undefined, 3, remain);
       } catch (e) {
         break; // 某站失败不影响另一站
       }
@@ -214,7 +222,11 @@ async function fetchRange(platform, keyword, start, count) {
       if (p === 1) cacheSetPage1(platform, keyword, list, pageTotal);
     }
     if (pageTotal) total = pageTotal;
-    if (list.length === 0) break;
+    if (list.length === 0) {
+      if (p === firstPage) total = 0; // 站点怪癖：total>0 但列表为空
+      break;
+    }
+    if (!total) total = list.length; // 接口未给 total 时以列表长度兜底
     for (let i = 0; i < list.length; i++) {
       const abs = (p - 1) * PAGE + i;
       if (abs >= start && abs < start + count) out.push(list[i]);
@@ -224,42 +236,37 @@ async function fetchRange(platform, keyword, start, count) {
   return { items: out, total: total };
 }
 
-async function totalOf(platform, keyword) {
-  const cached = cacheGet(platform, keyword, 1);
-  if (cached) return cached.total || cached.list.length;
+// 某站搜索总数：委托 fetchRange 取第一页的 total（缓存命中时不再发请求）。
+async function totalOf(platform, keyword, remain) {
   try {
-    const d = await apiRetry("search", { platform: platform, keyword: keyword, page: 1, size: PAGE });
-    const list = (d && d.list) || [];
-    const total = Number(d && d.total) || 0;
-    cacheSetPage1(platform, keyword, list, total); // 空列表不会被缓存
-    if (list.length === 0) return 0; // 处理“total>0 但列表为空”的站点怪癖
-    return total || list.length;
+    return (await fetchRange(platform, keyword, 0, 1, remain)).total;
   } catch (e) {
     return 0;
   }
 }
 
 // 固定「多站合一」：先网易云，再酷我，连续无空洞，保证 offset 分页语义正确。
+// 两站的 totalOf 与 fetchRange 均并行执行，整体限时 SEARCH_DEADLINE（须小于宿主 30s 超时）。
 async function doSearch(keyword, offset) {
+  const deadline = Date.now() + SEARCH_DEADLINE;
+  const remain = () => deadline - Date.now();
   const count = PAGE;
-  const totals = await Promise.all([totalOf("wyy", keyword), totalOf("kuwo", keyword)]);
+  const totals = await Promise.all([totalOf("wyy", keyword, remain), totalOf("kuwo", keyword, remain)]);
   const wyyTotal = totals[0];
   const kuwoTotal = totals[1];
   const combinedTotal = wyyTotal + kuwoTotal;
   const end = Math.min(offset + count, combinedTotal);
-  const tracks = [];
   const wa0 = offset;
   const wa1 = Math.min(end, wyyTotal);
-  if (wa1 > wa0) {
-    const r = await fetchRange("wyy", keyword, wa0, wa1 - wa0);
-    for (const it of r.items) tracks.push(songToTrack("wyy", it));
-  }
   const ka0 = Math.max(offset, wyyTotal);
   const ka1 = end;
-  if (ka1 > ka0) {
-    const r = await fetchRange("kuwo", keyword, ka0 - wyyTotal, ka1 - ka0);
-    for (const it of r.items) tracks.push(songToTrack("kuwo", it));
-  }
+  const [wyyR, kuwoR] = await Promise.all([
+    wa1 > wa0 ? fetchRange("wyy", keyword, wa0, wa1 - wa0, remain) : null,
+    ka1 > ka0 ? fetchRange("kuwo", keyword, ka0 - wyyTotal, ka1 - ka0, remain) : null,
+  ]);
+  const tracks = [];
+  if (wyyR) for (const it of wyyR.items) tracks.push(songToTrack("wyy", it));
+  if (kuwoR) for (const it of kuwoR.items) tracks.push(songToTrack("kuwo", it));
   return { tracks: tracks, more: offset + count < combinedTotal };
 }
 
@@ -463,9 +470,24 @@ async function wyyChartLinks() {
   );
 }
 
+// 榜单页缓存：榜单标题/封面基本不变，避免每次进页都向 4 个歌单各发一次请求。
+// 封面全部缺失（上游抖动）时不缓存，下次进页重试。
+// 只缓存 links；sections 数组每次新建，防止调用方 push「我的歌单」分区时污染缓存。
+let chartsCache = null; // { links, exp }
+const CHARTS_CACHE_TTL = 10 * 60 * 1000;
+
 // 榜单页分栏：网易云榜单
 async function chartSections() {
-  return [{ title: t("NetEase Cloud Music"), links: await wyyChartLinks() }];
+  let links;
+  if (chartsCache && chartsCache.exp > Date.now()) {
+    links = chartsCache.links;
+  } else {
+    links = await wyyChartLinks();
+    if (links.some((l) => l.imageUrl)) {
+      chartsCache = { links: links, exp: Date.now() + CHARTS_CACHE_TTL };
+    }
+  }
+  return [{ title: t("NetEase Cloud Music"), links: links }];
 }
 
 export async function browse({ page }) {
@@ -557,6 +579,8 @@ function refreshPlaylistCover(pl) {
   if (pl.tracks && pl.tracks.length > 0) {
     const t0 = pl.tracks[0];
     if (t0 && t0.album && t0.album.imageUrl) pl.imageUrl = t0.album.imageUrl;
+  } else {
+    pl.imageUrl = ""; // 空歌单不留已删歌曲的封面
   }
 }
 
@@ -565,7 +589,7 @@ async function resolveTrackById(id) {
   const p = parseId(id);
   if (!p.id || (p.platform !== "wyy" && p.platform !== "kuwo")) return null;
   try {
-    const d = await api("song", { platform: p.platform, id: p.id });
+    const d = await apiRetry("song", { platform: p.platform, id: p.id });
     const it = d && d.list && d.list[0];
     if (it) return songToTrack(p.platform, it);
   } catch (e) {}
@@ -609,34 +633,49 @@ export async function renamePlaylist({ id, name }) {
 }
 
 export async function deletePlaylist({ id }) {
-  savePlaylists(loadPlaylists().filter((pl) => pl.id !== String(id)));
+  const list = loadPlaylists();
+  if (!findPlaylist(list, String(id))) throw fail("unavailable", "playlist not found");
+  savePlaylists(list.filter((pl) => pl.id !== String(id)));
 }
 
 export async function addToPlaylist({ id, trackIds }) {
-  const list = loadPlaylists();
-  const pl = findPlaylist(list, String(id));
-  if (!pl) throw fail("unavailable", "playlist not found");
-  if (!Array.isArray(pl.tracks)) pl.tracks = [];
-  const ids = Array.isArray(trackIds) ? trackIds : [];
-  const have = new Set(pl.tracks.map((tr) => tr.id));
+  const plId = String(id);
+  // 第一次读盘只为了找出缺失 id；随后的网络解析不再持有这份快照，
+  // 避免“解析期间其他调用改了歌单，最后被本调用整体写回覆盖”的丢失更新。
+  const first = findPlaylist(loadPlaylists(), plId);
+  if (!first) throw fail("unavailable", "playlist not found");
+  if (!Array.isArray(first.tracks)) first.tracks = [];
+  const have = new Set(first.tracks.map((tr) => tr.id));
   const missing = [];
-  for (const tid of ids) {
+  for (const tid of Array.isArray(trackIds) ? trackIds : []) {
     const key = String(tid);
     if (!have.has(key) && missing.indexOf(key) < 0) missing.push(key);
   }
   // 有界并发解析缺失曲目（每批 5 个），避免一次性几十个请求触发限流
-  if (missing.length) {
-    const resolved = await mapLimit(missing, 5, (k) => resolveTrackById(k));
-    for (let i = 0; i < missing.length; i++) {
-      const tr = resolved[i];
-      if (tr) {
-        pl.tracks.push(tr);
-        have.add(missing[i]);
-      }
+  const resolved = missing.length
+    ? await mapLimit(missing, 5, (k) => resolveTrackById(k))
+    : [];
+  // 解析完成后重新读盘并只更新目标歌单：load→save 之间无 await，单线程下原子。
+  const list = loadPlaylists();
+  const pl = findPlaylist(list, plId);
+  if (!pl) throw fail("unavailable", "playlist not found"); // 解析期间歌单可能已被删除
+  if (!Array.isArray(pl.tracks)) pl.tracks = [];
+  const haveNow = new Set(pl.tracks.map((tr) => tr.id));
+  let added = 0;
+  let failed = 0;
+  for (let i = 0; i < missing.length; i++) {
+    const tr = resolved[i];
+    if (tr && !haveNow.has(tr.id)) {
+      pl.tracks.push(tr);
+      haveNow.add(tr.id);
+      added++;
+    } else if (!tr) {
+      failed++;
     }
   }
   refreshPlaylistCover(pl);
   savePlaylists(list);
+  return { added, failed };
 }
 
 export async function removeFromPlaylist({ id, trackIds }) {
@@ -656,10 +695,11 @@ export async function movePlaylistTrack({ id, from, to }) {
   const tracks = pl.tracks || [];
   const a = Number(from);
   const b = Number(to);
-  if (a >= 0 && a < tracks.length && b >= 0 && b < tracks.length) {
-    const moved = tracks.splice(a, 1)[0];
-    tracks.splice(b, 0, moved);
-    pl.tracks = tracks;
-    savePlaylists(list);
+  if (!(a >= 0 && a < tracks.length && b >= 0 && b < tracks.length)) {
+    throw fail("unavailable", "invalid track index");
   }
+  const moved = tracks.splice(a, 1)[0];
+  tracks.splice(b, 0, moved);
+  pl.tracks = tracks;
+  savePlaylists(list);
 }

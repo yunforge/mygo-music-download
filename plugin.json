@@ -8,12 +8,10 @@
   "permissions": {
     "network": [
       "flac.music.hi.cn",
-      "*.music.126.net",
       "*.126.net",
       "music.163.com",
       "*.kuwo.cn",
-      "kuwo.cn",
-      "www.kuwo.cn"
+      "kuwo.cn"
     ]
   },
   "settings": [

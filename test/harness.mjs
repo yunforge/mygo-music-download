@@ -193,14 +193,17 @@ await probeAudio(stk, "kuwo lossless");
 line("playlists: create");
 SETTINGS = {}; // all 模式，用真实搜索结果 id
 const s0 = await mod.search({ query: "周杰伦", kind: "tracks", offset: 0 });
+check(s0.tracks.length >= 2, "搜索结果至少 2 首（后续歌单断言依赖两首不同的歌）");
 const trackA = s0.tracks[0];
-const trackB = s0.tracks[1] || s0.tracks[0];
+const trackB = s0.tracks[1];
 const created = await mod.createPlaylist({ name: "我的测试歌单" });
 console.log("  created:", created.id, created.name, "mine:", created.mine);
 check(!!created.id && created.name === "我的测试歌单" && created.mine === true, "创建歌单成功且 mine=true");
 
 line("playlists: addToPlaylist (模拟右键添加到歌单)");
-await mod.addToPlaylist({ id: created.id, trackIds: [trackA.id, trackB.id] });
+const addRes = await mod.addToPlaylist({ id: created.id, trackIds: [trackA.id, trackB.id] });
+console.log("  addToPlaylist 返回:", JSON.stringify(addRes));
+check(addRes && addRes.added === 2 && addRes.failed === 0, "addToPlaylist 返回 {added:2, failed:0}");
 const plFull = await mod.playlist({ id: created.id });
 console.log("  playlist tracks:", plFull.tracks.length, "first:", plFull.tracks[0] && plFull.tracks[0].name);
 check(plFull.tracks.length === 2, "歌单里有 2 首");
@@ -224,11 +227,28 @@ check(pl2.tracks[1] && pl2.tracks[1].id === trackA.id, "movePlaylistTrack 生效
 await mod.removeFromPlaylist({ id: created.id, trackIds: [trackA.id] });
 pl2 = await mod.playlist({ id: created.id });
 check(pl2.tracks.length === 1, "removeFromPlaylist 删除一首后剩 1 首");
+await mod.removeFromPlaylist({ id: created.id, trackIds: [trackB.id] });
+pl2 = await mod.playlist({ id: created.id });
+check(pl2.tracks.length === 0 && pl2.imageUrl === "", "清空歌单后封面被清空");
 
 line("playlists: delete");
 await mod.deletePlaylist({ id: created.id });
 const after = await mod.playlists();
 check(!after.some((p) => p.id === created.id), "删除歌单后列表不再包含");
+let deleteMissingThrew = false;
+try {
+  await mod.deletePlaylist({ id: created.id });
+} catch (e) {
+  deleteMissingThrew = e && e.code === "unavailable";
+}
+check(deleteMissingThrew, "删除不存在的歌单明确报 unavailable");
+let moveInvalidThrew = false;
+try {
+  await mod.movePlaylistTrack({ id: "pl_nonexistent", from: 0, to: 1 });
+} catch (e) {
+  moveInvalidThrew = e && e.code === "unavailable";
+}
+check(moveInvalidThrew, "movePlaylistTrack 对不存在歌单明确报错");
 
 // ---------- 9. 空查询 / 其他 kind / 非法 id ----------
 line("边界：空查询 & 非 tracks kind & 非法 id");
